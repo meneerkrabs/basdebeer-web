@@ -153,7 +153,9 @@ export class ArchiveVfs implements Vfs {
     const variants = [...new Set([name, name.toUpperCase(), lower[0].toUpperCase() + lower.slice(1), lower])];
     for (const v of variants) {
       const res = await fetch(this.url.replace(/[^/]*%2F$/, '') + encodeURIComponent(v));
-      if (res.ok) return res.arrayBuffer();
+      if (!res.ok) continue;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > 0) return buf; // a wrong-case name gives "200 OK" with an empty body
     }
     throw new Error(`archive.org: ${name} niet gevonden`);
   }
