@@ -228,6 +228,7 @@ export class Display {
     this.video.playsInline = true;
     this.video.hidden = true;
     root.appendChild(this.video);
+    if (import.meta.env.DEV) (globalThis as { __display?: Display }).__display = this;
     this.presenter = createPresenter(this.canvas, Display.savedMode());
     Surface.smoothStipple = Surface.hiResText = this.presenter.mode === 'smooth';
     this.textLayer = document.createElement('canvas');
@@ -321,13 +322,20 @@ export class Display {
     ctx.clearRect(0, 0, this.textLayer.width, this.textLayer.height);
     const k = this.textLayer.width / this.width;
     for (const r of runs) {
-      const box = Surface.runBox(r);
+      // glyphs may overhang their advance width (bold k, f, quotes): give each word a margin;
+      // only a real clip (scroll window, partial copy) cuts it off
+      const natural = Surface.runBox({ ...r, clip: null });
+      const pad = Math.ceil(r.font.px * 0.35);
+      let box: [number, number, number, number] = [natural[0] - pad, natural[1] - pad, natural[2] + pad, natural[3] + pad];
+      if (r.clip) box = [Math.max(box[0], r.clip[0]), Math.max(box[1], r.clip[1]), Math.min(box[2], r.clip[2]), Math.min(box[3], r.clip[3])];
       if (box[2] <= box[0] || box[3] <= box[1]) continue;
       // render the run on its own so covered parts can be cut out
       const tw = Math.ceil((box[2] - box[0]) * k), th = Math.ceil((box[3] - box[1]) * k);
-      const tmp = this.runCanvas(tw, th);
+      // the scratch canvas is shared between runs: clear a margin too, because scaling reads
+      // one pixel beyond the source rect and would pick up the previous (wider) word
+      const tmp = this.runCanvas(tw + 2, th + 2);
       const t = tmp.getContext('2d')!;
-      t.clearRect(0, 0, tw, th);
+      t.clearRect(0, 0, tw + 2, th + 2);
       t.textBaseline = 'alphabetic';
       t.font = cssFont({ ...r.font, px: r.font.px * k });
       t.fillStyle = cssColor(r.font.color);
@@ -346,7 +354,7 @@ export class Display {
           }
         }
       }
-      ctx.drawImage(tmp, 0, 0, tw, th, box[0] * k, box[1] * k, tw, th);
+      ctx.drawImage(tmp, 0, 0, tw, th, Math.round(box[0] * k), Math.round(box[1] * k), tw, th);
     }
   }
 
