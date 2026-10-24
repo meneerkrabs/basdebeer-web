@@ -1,0 +1,5 @@
+node_modules/
+dist/
+public/data/
+tools/soundfont.sf2
+.DS_Store

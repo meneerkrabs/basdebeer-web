@@ -1,0 +1,12 @@
+html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family: Arial, Helvetica, sans-serif; overflow: hidden; }
+#app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+.bdb-root { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.bdb-screen { image-rendering: pixelated; touch-action: none; display: block; }
+.bdb-video { position: absolute; object-fit: fill; background: #000; image-rendering: pixelated; }
+.bdb-start { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem; background: radial-gradient(#123 0%, #000 70%); z-index: 10; }
+.bdb-start h1 { font-size: 2.4rem; margin: 0; color: #fc3; text-shadow: 2px 2px 0 #630; }
+.bdb-start .books { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+.bdb-start button { font-size: 1.2rem; padding: 0.9rem 1.4rem; border-radius: 12px; border: 3px solid #fc3; background: #036; color: #fff; cursor: pointer; }
+.bdb-start button:disabled { opacity: 0.4; cursor: not-allowed; }
+.bdb-start .note { font-size: 0.85rem; opacity: 0.7; max-width: 40rem; text-align: center; }
+.bdb-error { position: absolute; inset: auto 1rem 1rem 1rem; padding: 1rem; background: #600; color: #fff; z-index: 20; white-space: pre-wrap; font-family: monospace; }

@@ -1,0 +1,327 @@
+// A software framebuffer that emulates the bits of Win32 GDI the original games use
+// (BitBlt with raster ops, StretchBlt, FillRect, TextOut). Pixels are stored as
+// 0x00BBGGRR (the alpha byte is forced to 0xFF on presentation), matching a COLORREF.
+
+export const SRCCOPY = 0xcc0020;
+export const SRCPAINT = 0xee0086; // dst | src
+export const SRCAND = 0x8800c6; // dst & src
+export const SRCINVERT = 0x660046; // dst ^ src
+export const SRCERASE = 0x440328; // src & ~dst
+export const NOTSRCCOPY = 0x330008; // ~src
+export const NOTSRCERASE = 0x1100a6; // ~(dst | src)
+export const MERGEPAINT = 0xbb0226; // dst | ~src
+export const DSTINVERT = 0x550009; // ~dst
+export const BLACKNESS = 0x000042;
+export const WHITENESS = 0xff0062;
+export const DSNA = 0x220326; // dst & ~src
+
+export type Rop = number;
+
+/** COLORREF helpers (0x00BBGGRR). */
+export const rgb = (r: number, g: number, b: number) => ((b & 255) << 16) | ((g & 255) << 8) | (r & 255);
+export const cssColor = (c: number) => `rgb(${c & 255},${(c >> 8) & 255},${(c >> 16) & 255})`;
+
+/** Delphi TColor names used by the games' scripts/forms. */
+export const DELPHI_COLORS: Record<string, number> = {
+  clblack: 0x000000, clmaroon: 0x000080, clgreen: 0x008000, clolive: 0x008080,
+  clnavy: 0x800000, clpurple: 0x800080, clteal: 0x808000, clgray: 0x808080,
+  clsilver: 0xc0c0c0, clred: 0x0000ff, cllime: 0x00ff00, clyellow: 0x00ffff,
+  clblue: 0xff0000, clfuchsia: 0xff00ff, claqua: 0xffff00, clwhite: 0xffffff,
+  black: 0x000000, maroon: 0x000080, green: 0x008000, olive: 0x008080, navy: 0x800000,
+  purple: 0x800080, teal: 0x808000, gray: 0x808080, silver: 0xc0c0c0, red: 0x0000ff,
+  lime: 0x00ff00, yellow: 0x00ffff, blue: 0xff0000, fuchsia: 0xff00ff, aqua: 0xffff00, white: 0xffffff,
+};
+
+export function parseColor(s: string): number {
+  const k = s.trim().toLowerCase();
+  if (k in DELPHI_COLORS) return DELPHI_COLORS[k];
+  if (k.startsWith('$')) return parseInt(k.slice(1), 16) & 0xffffff;
+  const n = Number(k);
+  return Number.isFinite(n) ? n & 0xffffff : 0;
+}
+
+export interface FontSpec {
+  name: string;
+  /** Pixel height of the em (Delphi Font.Height is -px; Font.Size pt -> px = pt*96/72). */
+  px: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color: number;
+}
+
+const FONT_FALLBACK: Record<string, string> = {
+  'ms sans serif': '"MS Sans Serif", "Microsoft Sans Serif", Tahoma, Arial, sans-serif',
+  arial: 'Arial, Helvetica, sans-serif',
+  'times new roman': '"Times New Roman", Times, serif',
+  'comic sans ms': '"Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive',
+};
+export const cssFont = (f: FontSpec) =>
+  `${f.italic ? 'italic ' : ''}${f.bold ? 'bold ' : ''}${f.px}px ${FONT_FALLBACK[f.name.toLowerCase()] ?? `"${f.name}", Arial, sans-serif`}`;
+
+let measureCtx: OffscreenCanvasRenderingContext2D | null = null;
+function textCtx(): OffscreenCanvasRenderingContext2D {
+  if (!measureCtx) measureCtx = new OffscreenCanvas(1024, 128).getContext('2d', { willReadFrequently: true })!;
+  return measureCtx;
+}
+
+export class Surface {
+  readonly width: number;
+  readonly height: number;
+  readonly px: Uint32Array;
+  /** Palette of the source 8-bit bitmap, if any (for colour-key lookups). */
+  palette?: Uint32Array;
+  /** Original palette indices of an 8-bit bitmap (some games test pixel indices). */
+  indices?: Uint8Array;
+
+  constructor(width: number, height: number, fill = 0) {
+    this.width = Math.max(0, width | 0);
+    this.height = Math.max(0, height | 0);
+    this.px = new Uint32Array(this.width * this.height);
+    if (fill) this.px.fill(fill);
+  }
+
+  clone(): Surface {
+    const s = new Surface(this.width, this.height);
+    s.px.set(this.px);
+    s.palette = this.palette;
+    s.indices = this.indices;
+    return s;
+  }
+
+  getPixel(x: number, y: number): number {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return -1;
+    return this.px[y * this.width + x];
+  }
+
+  setPixel(x: number, y: number, c: number) {
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) return;
+    this.px[y * this.width + x] = c & 0xffffff;
+  }
+
+  fillRect(x1: number, y1: number, x2: number, y2: number, color: number) {
+    const ax = Math.max(0, x1 | 0), ay = Math.max(0, y1 | 0);
+    const bx = Math.min(this.width, x2 | 0), by = Math.min(this.height, y2 | 0);
+    for (let y = ay; y < by; y++) this.px.fill(color & 0xffffff, y * this.width + ax, y * this.width + bx);
+  }
+
+  /** Win32 Rectangle/FrameRect-style outline (right/bottom exclusive). */
+  frameRect(x1: number, y1: number, x2: number, y2: number, color: number, width = 1) {
+    this.fillRect(x1, y1, x2, y1 + width, color);
+    this.fillRect(x1, y2 - width, x2, y2, color);
+    this.fillRect(x1, y1, x1 + width, y2, color);
+    this.fillRect(x2 - width, y1, x2, y2, color);
+  }
+
+  /** BitBlt(this, dx, dy, w, h, src, sx, sy, rop). */
+  bitBlt(dx: number, dy: number, w: number, h: number, src: Surface | null, sx = 0, sy = 0, rop: Rop = SRCCOPY) {
+    dx |= 0; dy |= 0; w |= 0; h |= 0; sx |= 0; sy |= 0;
+    // clip against destination
+    if (dx < 0) { sx -= dx; w += dx; dx = 0; }
+    if (dy < 0) { sy -= dy; h += dy; dy = 0; }
+    if (dx + w > this.width) w = this.width - dx;
+    if (dy + h > this.height) h = this.height - dy;
+    if (src) {
+      // pixels outside the source read as black, like an off-bitmap DC area
+      if (sx < 0) { dx -= sx; w += sx; sx = 0; }
+      if (sy < 0) { dy -= sy; h += sy; sy = 0; }
+      if (sx + w > src.width) w = src.width - sx;
+      if (sy + h > src.height) h = src.height - sy;
+    }
+    if (w <= 0 || h <= 0) return;
+    const d = this.px, W = this.width;
+    const s = src?.px, SW = src?.width ?? 0;
+    for (let y = 0; y < h; y++) {
+      let di = (dy + y) * W + dx;
+      let si = (sy + y) * SW + sx;
+      switch (rop) {
+        case SRCCOPY: d.set(s!.subarray(si, si + w), di); break;
+        case SRCPAINT: for (let x = 0; x < w; x++, di++, si++) d[di] |= s![si]; break;
+        case SRCAND: for (let x = 0; x < w; x++, di++, si++) d[di] &= s![si]; break;
+        case SRCINVERT: for (let x = 0; x < w; x++, di++, si++) d[di] = (d[di] ^ s![si]) & 0xffffff; break;
+        case SRCERASE: for (let x = 0; x < w; x++, di++, si++) d[di] = s![si] & ~d[di] & 0xffffff; break;
+        case NOTSRCCOPY: for (let x = 0; x < w; x++, di++, si++) d[di] = ~s![si] & 0xffffff; break;
+        case NOTSRCERASE: for (let x = 0; x < w; x++, di++, si++) d[di] = ~(d[di] | s![si]) & 0xffffff; break;
+        case MERGEPAINT: for (let x = 0; x < w; x++, di++, si++) d[di] = (d[di] | ~s![si]) & 0xffffff; break;
+        case DSNA: for (let x = 0; x < w; x++, di++, si++) d[di] = d[di] & ~s![si] & 0xffffff; break;
+        case DSTINVERT: for (let x = 0; x < w; x++, di++) d[di] = ~d[di] & 0xffffff; break;
+        case BLACKNESS: d.fill(0, di, di + w); break;
+        case WHITENESS: d.fill(0xffffff, di, di + w); break;
+        default: throw new Error(`unsupported ROP 0x${rop.toString(16)}`);
+      }
+    }
+  }
+
+  /** Copy with a transparent colour key (TBitmap.Transparent / TransparentBlt). */
+  blitKeyed(dx: number, dy: number, w: number, h: number, src: Surface, sx: number, sy: number, key: number) {
+    dx |= 0; dy |= 0; w |= 0; h |= 0; sx |= 0; sy |= 0;
+    if (dx < 0) { sx -= dx; w += dx; dx = 0; }
+    if (dy < 0) { sy -= dy; h += dy; dy = 0; }
+    if (sx < 0) { dx -= sx; w += sx; sx = 0; }
+    if (sy < 0) { dy -= sy; h += sy; sy = 0; }
+    w = Math.min(w, this.width - dx, src.width - sx);
+    h = Math.min(h, this.height - dy, src.height - sy);
+    if (w <= 0 || h <= 0) return;
+    key &= 0xffffff;
+    for (let y = 0; y < h; y++) {
+      let di = (dy + y) * this.width + dx, si = (sy + y) * src.width + sx;
+      for (let x = 0; x < w; x++, di++, si++) {
+        const c = src.px[si];
+        if (c !== key) this.px[di] = c;
+      }
+    }
+  }
+
+  /** StretchBlt with nearest-neighbour sampling (COLORONCOLOR). */
+  stretchBlt(dx: number, dy: number, dw: number, dh: number, src: Surface, sx: number, sy: number, sw: number, sh: number, rop: Rop = SRCCOPY) {
+    if (dw === sw && dh === sh) return this.bitBlt(dx, dy, dw, dh, src, sx, sy, rop);
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return;
+    const tmp = new Surface(dw, dh);
+    for (let y = 0; y < dh; y++) {
+      const syy = sy + Math.floor((y * sh) / dh);
+      for (let x = 0; x < dw; x++) {
+        const v = src.getPixel(sx + Math.floor((x * sw) / dw), syy);
+        tmp.px[y * dw + x] = v < 0 ? 0 : v;
+      }
+    }
+    this.bitBlt(dx, dy, dw, dh, tmp, 0, 0, rop);
+  }
+
+  /** Draw text (TextOut). Antialiasing is thresholded away to mimic 1990s GDI rendering. */
+  textOut(x: number, y: number, text: string, font: FontSpec, bgColor: number | null = null): { w: number; h: number } {
+    const ctx = textCtx();
+    ctx.font = cssFont(font);
+    const m = ctx.measureText(text);
+    const w = Math.ceil(m.width) + 2;
+    const asc = Math.ceil(font.px * 0.9), h = Math.ceil(font.px * 1.2);
+    if (bgColor !== null) this.fillRect(x, y, x + w - 2, y + h, bgColor);
+    if (w <= 2) return { w: 0, h };
+    if (ctx.canvas.width < w || ctx.canvas.height < h) {
+      ctx.canvas.width = Math.max(ctx.canvas.width, w);
+      ctx.canvas.height = Math.max(ctx.canvas.height, h);
+      ctx.font = cssFont(font);
+    }
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#000';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(text, 0, asc);
+    if (font.underline) ctx.fillRect(0, asc + 1, w - 2, Math.max(1, Math.round(font.px / 14)));
+    const data = ctx.getImageData(0, 0, w, h).data;
+    const c = font.color & 0xffffff;
+    for (let yy = 0; yy < h; yy++) {
+      const py = y + yy;
+      if (py < 0 || py >= this.height) continue;
+      for (let xx = 0; xx < w; xx++) {
+        if (data[(yy * w + xx) * 4 + 3] >= 110) {
+          const px = x + xx;
+          if (px >= 0 && px < this.width) this.px[py * this.width + px] = c;
+        }
+      }
+    }
+    return { w: Math.ceil(m.width), h };
+  }
+
+  static textWidth(text: string, font: FontSpec): number {
+    const ctx = textCtx();
+    ctx.font = cssFont(font);
+    return Math.ceil(ctx.measureText(text).width);
+  }
+
+  /** Build a mask: pixels equal to `key` become white (0xFFFFFF), others black — like a monochrome TBitmap mask. */
+  makeMask(key: number): Surface {
+    const m = new Surface(this.width, this.height);
+    key &= 0xffffff;
+    for (let i = 0; i < this.px.length; i++) m.px[i] = this.px[i] === key ? 0xffffff : 0;
+    return m;
+  }
+
+  /** Write into an RGBA ImageData buffer. */
+  toImageData(out: ImageData, ox = 0, oy = 0) {
+    const dst = new Uint32Array(out.data.buffer);
+    const W = out.width, H = out.height;
+    for (let y = 0; y < this.height; y++) {
+      const py = oy + y;
+      if (py < 0 || py >= H) continue;
+      for (let x = 0; x < this.width; x++) {
+        const px = ox + x;
+        if (px < 0 || px >= W) continue;
+        dst[py * W + px] = this.px[y * this.width + x] | 0xff000000;
+      }
+    }
+  }
+}
+
+/** Decode a Windows BMP (1/4/8/24/32 bpp, uncompressed or RLE8/RLE4). */
+export function decodeBmp(buf: ArrayBuffer): Surface {
+  const v = new DataView(buf);
+  if (v.getUint16(0, true) !== 0x4d42) throw new Error('not a BMP');
+  const off = v.getUint32(10, true);
+  const hdr = v.getUint32(14, true);
+  let w: number, h: number, bpp: number, comp = 0, clrUsed = 0;
+  if (hdr === 12) {
+    w = v.getUint16(18, true); h = v.getInt16(20, true); bpp = v.getUint16(24, true);
+  } else {
+    w = v.getInt32(18, true); h = v.getInt32(22, true); bpp = v.getUint16(28, true);
+    comp = v.getUint32(30, true); clrUsed = v.getUint32(46, true);
+  }
+  const topDown = h < 0;
+  h = Math.abs(h);
+  const s = new Surface(w, h);
+  let pal: Uint32Array | undefined;
+  if (bpp <= 8) {
+    const n = clrUsed || 1 << bpp;
+    pal = new Uint32Array(1 << bpp);
+    const pe = hdr === 12 ? 3 : 4;
+    for (let i = 0; i < n && i < pal.length; i++) {
+      const p = 14 + hdr + i * pe;
+      pal[i] = rgb(v.getUint8(p + 2), v.getUint8(p + 1), v.getUint8(p));
+    }
+    s.palette = pal;
+    s.indices = new Uint8Array(w * h);
+  }
+  const bytes = new Uint8Array(buf);
+  const put = (x: number, y: number, idx: number) => {
+    if (x >= w || y >= h) return;
+    const row = topDown ? y : h - 1 - y;
+    s.indices![row * w + x] = idx;
+    s.px[row * w + x] = pal![idx];
+  };
+  if (comp === 1 || comp === 2) {
+    // RLE8 / RLE4
+    let p = off, x = 0, y = 0;
+    while (p < bytes.length) {
+      const a = bytes[p++], b = bytes[p++];
+      if (a > 0) {
+        for (let i = 0; i < a; i++) put(x++, y, comp === 1 ? b : i & 1 ? b & 15 : b >> 4);
+      } else if (b === 0) { x = 0; y++; }
+      else if (b === 1) break;
+      else if (b === 2) { x += bytes[p++]; y += bytes[p++]; }
+      else {
+        for (let i = 0; i < b; i++) {
+          const val = comp === 1 ? bytes[p + i] : i & 1 ? bytes[p + (i >> 1)] & 15 : bytes[p + (i >> 1)] >> 4;
+          put(x++, y, val);
+        }
+        const used = comp === 1 ? b : (b + 1) >> 1;
+        p += used + (used & 1);
+      }
+    }
+    return s;
+  }
+  const stride = (((w * bpp + 31) >> 5) << 2);
+  for (let y = 0; y < h; y++) {
+    const row = topDown ? y : h - 1 - y;
+    const p0 = off + y * stride;
+    for (let x = 0; x < w; x++) {
+      let c: number;
+      if (bpp === 8) { const i = bytes[p0 + x]; s.indices![row * w + x] = i; c = pal![i]; }
+      else if (bpp === 4) { const i = (bytes[p0 + (x >> 1)] >> (x & 1 ? 0 : 4)) & 15; s.indices![row * w + x] = i; c = pal![i]; }
+      else if (bpp === 1) { const i = (bytes[p0 + (x >> 3)] >> (7 - (x & 7))) & 1; s.indices![row * w + x] = i; c = pal![i]; }
+      else if (bpp === 24) { const q = p0 + x * 3; c = rgb(bytes[q + 2], bytes[q + 1], bytes[q]); }
+      else if (bpp === 32) { const q = p0 + x * 4; c = rgb(bytes[q + 2], bytes[q + 1], bytes[q]); }
+      else if (bpp === 16) { const q = v.getUint16(p0 + x * 2, true); c = rgb(((q >> 10) & 31) << 3, ((q >> 5) & 31) << 3, (q & 31) << 3); }
+      else throw new Error(`unsupported bpp ${bpp}`);
+      s.px[row * w + x] = c;
+    }
+  }
+  return s;
+}
