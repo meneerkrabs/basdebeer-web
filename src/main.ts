@@ -103,9 +103,9 @@ async function play(book: Book, assets: Assets) {
     // dev route: run one minigame directly (?game=1)
     const mod = await registry[game]();
     const session = mod.default({ display, assets });
+    addEventListener('keydown', (e) => (e.key === 'q' || e.key === 'Escape') && session.requestQuit?.());
     const code = await session.result;
     console.log(`minigame ${game} ended with code ${code}`);
-    addEventListener('keydown', (e) => e.key === 'q' && session.requestQuit?.());
     return;
   }
   // The story engines are being ported; until then offer the minigames directly.
