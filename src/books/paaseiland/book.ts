@@ -282,6 +282,10 @@ class PaaseilandBook {
     this.hourglass = true;
     this.form.cursor = 'wait';
     this.currentScene = n;
+    // The original only wrote the bookmark when the program was closed (FormClose); a
+    // browser tab can just be closed, so save on every page (the resume table still maps
+    // movie/game/end pages, 0 = start over).
+    if (n !== 0) localStorage.setItem(BOOKMARK_KEY, String(n));
     const name = `${String(n).padStart(3, '0')}.BSB`;
     const text = await this.assets.script(name);
     this.script = text.split(/\r?\n/).filter((l) => l.length > 0);
