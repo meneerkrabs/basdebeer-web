@@ -148,9 +148,14 @@ export class ArchiveVfs implements Vfs {
   }
 
   async readRoot(name: string) {
-    const res = await fetch(this.url.replace(/[^/]*%2F$/, '') + encodeURIComponent(name.toUpperCase()));
-    if (!res.ok) throw new Error(`archive.org: HTTP ${res.status} voor ${name}`);
-    return res.arrayBuffer();
+    // archive.org is case-sensitive and the CD root mixes cases (AUTORUN.INF next to Autorun.exe)
+    const lower = name.toLowerCase();
+    const variants = [...new Set([name, name.toUpperCase(), lower[0].toUpperCase() + lower.slice(1), lower])];
+    for (const v of variants) {
+      const res = await fetch(this.url.replace(/[^/]*%2F$/, '') + encodeURIComponent(v));
+      if (res.ok) return res.arrayBuffer();
+    }
+    throw new Error(`archive.org: ${name} niet gevonden`);
   }
 
   read(path: string): Promise<ArrayBuffer> {
