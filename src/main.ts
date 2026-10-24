@@ -117,4 +117,18 @@ async function play(book: Book, assets: Assets) {
   startScreen();
 }
 
-startScreen().catch(showError);
+async function boot() {
+  // dev shortcut: ?book=paaseiland&game=2 opens a minigame directly (click once to enable sound)
+  const params = new URLSearchParams(location.search);
+  const book = params.get('book') as Book | null;
+  if (import.meta.env.DEV && book) {
+    const open = (await availableBooks()).get(book);
+    if (open) {
+      addEventListener('pointerdown', () => audio.unlock(), { once: true });
+      return play(book, await open());
+    }
+  }
+  return startScreen();
+}
+
+boot().catch(showError);
