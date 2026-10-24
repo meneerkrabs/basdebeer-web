@@ -314,25 +314,48 @@ export class Display {
   /** Draw the screen's text runs (Surface.hiResText) sharp, at device resolution. */
   private drawText() {
     const runs = this.screen.textRuns;
-    const key = runs.map((r) => `${r.x},${r.y},${r.text},${r.font.color},${r.clip}`).join('|') + `@${this.textLayer.width}`;
+    const key = runs.map((r) => `${r.x},${r.y},${r.text},${r.font.color},${r.clip},${r.holes?.map((h) => `${h.rect}/${h.mask ? `${h.mask.mx},${h.mask.my}` : ''}`).join(';') ?? ''}`).join('|') + `@${this.textLayer.width}`;
     if (key === this.lastTextKey) return;
     this.lastTextKey = key;
     const ctx = this.textLayer.getContext('2d')!;
     ctx.clearRect(0, 0, this.textLayer.width, this.textLayer.height);
     const k = this.textLayer.width / this.width;
-    ctx.textBaseline = 'alphabetic';
     for (const r of runs) {
-      ctx.save();
-      const c = r.clip ?? [0, 0, this.width, this.height];
-      ctx.beginPath();
-      ctx.rect(c[0] * k, c[1] * k, (c[2] - c[0]) * k, (c[3] - c[1]) * k);
-      ctx.clip();
-      ctx.font = cssFont({ ...r.font, px: r.font.px * k });
-      ctx.fillStyle = cssColor(r.font.color);
-      ctx.fillText(r.text, r.x * k, (r.y + Math.ceil(r.font.px * 0.9)) * k);
-      if (r.font.underline) ctx.fillRect(r.x * k, (r.y + Math.ceil(r.font.px * 0.9) + 1) * k, (r.w ?? 0) * k, Math.max(1, (r.font.px / 14) * k));
-      ctx.restore();
+      const box = Surface.runBox(r);
+      if (box[2] <= box[0] || box[3] <= box[1]) continue;
+      // render the run on its own so covered parts can be cut out
+      const tw = Math.ceil((box[2] - box[0]) * k), th = Math.ceil((box[3] - box[1]) * k);
+      const tmp = this.runCanvas(tw, th);
+      const t = tmp.getContext('2d')!;
+      t.clearRect(0, 0, tw, th);
+      t.textBaseline = 'alphabetic';
+      t.font = cssFont({ ...r.font, px: r.font.px * k });
+      t.fillStyle = cssColor(r.font.color);
+      t.fillText(r.text, (r.x - box[0]) * k, (r.y - box[1] + Math.ceil(r.font.px * 0.9)) * k);
+      if (r.font.underline) t.fillRect((r.x - box[0]) * k, (r.y - box[1] + Math.ceil(r.font.px * 0.9) + 1) * k, (r.w ?? 0) * k, Math.max(1, (r.font.px / 14) * k));
+      for (const h of r.holes ?? []) {
+        const x1 = Math.max(h.rect[0], box[0]), y1 = Math.max(h.rect[1], box[1]), x2 = Math.min(h.rect[2], box[2]), y2 = Math.min(h.rect[3], box[3]);
+        if (x2 <= x1 || y2 <= y1) continue;
+        if (!h.mask) { t.clearRect((x1 - box[0]) * k, (y1 - box[1]) * k, (x2 - x1) * k, (y2 - y1) * k); continue; }
+        const m = h.mask;
+        for (let y = y1; y < y2; y++) {
+          for (let x = x1; x < x2; x++) {
+            const v = m.surface.getPixel(x + m.mx, y + m.my);
+            const covered = m.key === undefined ? v >= 0 && (v & 0x808080) === 0 : v >= 0 && v !== m.key;
+            if (covered) t.clearRect(Math.floor((x - box[0]) * k), Math.floor((y - box[1]) * k), Math.ceil(k), Math.ceil(k));
+          }
+        }
+      }
+      ctx.drawImage(tmp, 0, 0, tw, th, box[0] * k, box[1] * k, tw, th);
     }
+  }
+
+  private runCanvasEl: HTMLCanvasElement | null = null;
+  private runCanvas(w: number, h: number): HTMLCanvasElement {
+    const c = (this.runCanvasEl ??= document.createElement('canvas'));
+    if (c.width < w) c.width = w;
+    if (c.height < h) c.height = h;
+    return c;
   }
 
   /** Topmost visible form under a screen point (respecting modal forms). */

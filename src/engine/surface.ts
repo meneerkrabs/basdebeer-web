@@ -77,9 +77,26 @@ export interface TextRun {
   font: FontSpec;
   /** Visible area (this surface's coordinates), from blits that clipped the run. */
   clip: [number, number, number, number] | null;
+  /**
+   * Parts of the run that were painted over afterwards, like the pixels of real GDI text
+   * would have been: a rect (background restored / opaque copy) or a sprite mask
+   * (SRCAND: mask pixel (x + mx, y + my) black = covered).
+   */
+  holes?: TextHole[];
   /** Cached text width. */
   w?: number;
 }
+
+export interface TextHole {
+  rect: [number, number, number, number];
+  /** Covered where the mask pixel is black, or (with `key`) where it isn't the transparent key colour. */
+  mask?: { surface: Surface; mx: number; my: number; key?: number };
+}
+
+type Box = [number, number, number, number];
+const intersects = (a: Box, b: Box) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+const inside = (a: Box, b: Box) => a[0] >= b[0] && a[1] >= b[1] && a[2] <= b[2] && a[3] <= b[3];
+const MAX_HOLES = 24;
 
 /** Per-pixel weight of a stippled SRCAND mask (see Surface.smoothStipple); NaN = not stipple. */
 interface PendingStipple { surface: Surface; dx: number; dy: number; w: number; h: number; white: Float32Array }
@@ -130,30 +147,50 @@ export class Surface {
     return b;
   }
 
-  /** An opaque write to (x1,y1)-(x2,y2) covers the runs whose visible centre lies inside it. */
-  private coverRuns(x1: number, y1: number, x2: number, y2: number) {
+  /** An opaque write to (x1,y1)-(x2,y2) removes runs it fully covers and punches a hole in the others. */
+  private coverRuns(x1: number, y1: number, x2: number, y2: number, mask?: TextHole['mask']) {
     if (!this.textRuns.length) return;
-    this.textRuns = this.textRuns.filter((r) => {
-      const b = Surface.runBox(r);
+    const r: Box = [x1, y1, x2, y2];
+    this.textRuns = this.textRuns.filter((run) => {
+      const b = Surface.runBox(run);
       if (b[2] <= b[0] || b[3] <= b[1]) return false;
-      const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
-      return !(cx >= x1 && cx < x2 && cy >= y1 && cy < y2);
+      if (!intersects(b, r)) return true;
+      if (!mask && inside(b, r)) return false;
+      const holes = (run.holes ??= []);
+      holes.push({ rect: r, mask });
+      if (holes.length > MAX_HOLES) {
+        // too many sprite stamps on one word: merge them into one covering rectangle
+        const u = holes.reduce<Box>((a, h) => [Math.min(a[0], h.rect[0]), Math.min(a[1], h.rect[1]), Math.max(a[2], h.rect[2]), Math.max(a[3], h.rect[3])], [1e9, 1e9, -1e9, -1e9]);
+        run.holes = [{ rect: u }];
+      }
+      return true;
     });
   }
 
   /** Copy the runs of src's (sx,sy,w,h) to (dx,dy), clipped to the destination rect. */
   private copyRuns(src: Surface, dx: number, dy: number, w: number, h: number, sx: number, sy: number) {
     const ox = dx - sx, oy = dy - sy;
+    const dest: Box = [dx, dy, dx + w, dy + h];
     for (const r of src.textRuns) {
       const b = Surface.runBox(r);
       if (b[2] <= sx || b[0] >= sx + w || b[3] <= sy || b[1] >= sy + h) continue;
       const c = r.clip ?? [-1e9, -1e9, 1e9, 1e9];
-      const clip: [number, number, number, number] = [
-        Math.max(c[0] + ox, dx), Math.max(c[1] + oy, dy), Math.min(c[2] + ox, dx + w), Math.min(c[3] + oy, dy + h),
-      ];
-      const run = { ...r, x: r.x + ox, y: r.y + oy, clip };
-      // a word redrawn at the same spot (e.g. highlighted) replaces the old run
-      this.textRuns = this.textRuns.filter((o) => !(o.x === run.x && o.y === run.y && o.text === run.text));
+      const clip: Box = [Math.max(c[0] + ox, dx), Math.max(c[1] + oy, dy), Math.min(c[2] + ox, dx + w), Math.min(c[3] + oy, dy + h)];
+      const holes = r.holes?.map((hl) => ({
+        rect: [hl.rect[0] + ox, hl.rect[1] + oy, hl.rect[2] + ox, hl.rect[3] + oy] as Box,
+        mask: hl.mask && { ...hl.mask, mx: hl.mask.mx - ox, my: hl.mask.my - oy },
+      }));
+      const run: TextRun = { ...r, x: r.x + ox, y: r.y + oy, clip, holes };
+      // the same word already here (e.g. redrawn highlighted, or refreshed in parts): the
+      // visible area grows, and inside the refreshed rect the text is fresh again
+      const old = this.textRuns.find((o) => o.x === run.x && o.y === run.y && o.text === run.text);
+      if (old) {
+        if (old.clip) run.clip = [Math.min(old.clip[0], clip[0]), Math.min(old.clip[1], clip[1]), Math.max(old.clip[2], clip[2]), Math.max(old.clip[3], clip[3])];
+        else run.clip = null;
+        const kept = old.holes?.filter((hl) => !intersects(hl.rect, dest)) ?? [];
+        run.holes = [...kept, ...(holes ?? [])];
+        this.textRuns = this.textRuns.filter((o) => o !== old);
+      }
       this.textRuns.push(run);
     }
   }
@@ -201,6 +238,7 @@ export class Surface {
     if (w <= 0 || h <= 0) return;
     if (this.textRuns.length || src?.textRuns.length) {
       if (rop === SRCCOPY || rop === NOTSRCCOPY || rop === BLACKNESS || rop === WHITENESS) this.coverRuns(dx, dy, dx + w, dy + h);
+      else if (rop === SRCAND && src && this.textRuns.length) this.coverRuns(dx, dy, dx + w, dy + h, { surface: src, mx: sx - dx, my: sy - dy });
       if (src?.textRuns.length && (rop === SRCCOPY || rop === SRCPAINT || rop === SRCINVERT)) this.copyRuns(src, dx, dy, w, h, sx, sy);
     }
     if (Surface.smoothStipple && src) {
@@ -331,6 +369,7 @@ export class Surface {
     w = Math.min(w, this.width - dx, src.width - sx);
     h = Math.min(h, this.height - dy, src.height - sy);
     if (w <= 0 || h <= 0) return;
+    if (this.textRuns.length) this.coverRuns(dx, dy, dx + w, dy + h, { surface: src, mx: sx - dx, my: sy - dy, key: key & 0xffffff });
     key &= 0xffffff;
     for (let y = 0; y < h; y++) {
       let di = (dy + y) * this.width + dx, si = (sy + y) * src.width + sx;
