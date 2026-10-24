@@ -3,6 +3,7 @@
 // routing, Delphi's Random(), and an overlay for AVI playback (TMediaPlayer + Display).
 
 import { Surface } from './surface.ts';
+import { createPresenter, type DisplayMode, type Presenter } from './presenter.ts';
 
 export const SCREEN_W = 640;
 export const SCREEN_H = 480;
@@ -191,8 +192,7 @@ export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 /** The 640x480 "monitor": composites forms and routes input. */
 export class Display {
   readonly canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
-  private image: ImageData;
+  private presenter: Presenter;
   readonly screen = new Surface(SCREEN_W, SCREEN_H);
   private forms: Form[] = [];
   private modal: Form[] = [];
@@ -218,8 +218,7 @@ export class Display {
     this.video.playsInline = true;
     this.video.hidden = true;
     root.appendChild(this.video);
-    this.ctx = this.canvas.getContext('2d')!;
-    this.image = this.ctx.createImageData(SCREEN_W, SCREEN_H);
+    this.presenter = createPresenter(this.canvas, Display.savedMode());
     this.bindInput();
     this.layout();
     addEventListener('resize', () => this.layout());
@@ -235,11 +234,27 @@ export class Display {
     const scale = Math.min(r.width / SCREEN_W, r.height / SCREEN_H);
     const w = Math.floor(SCREEN_W * scale), h = Math.floor(SCREEN_H * scale);
     Object.assign(this.canvas.style, { width: `${w}px`, height: `${h}px` });
+    this.presenter.resize(w, h);
     this.scale = scale;
     this.positionVideo();
   }
   private scale = 1;
   private videoRect: [number, number, number, number] | null = null;
+
+  /** 'smooth' (de-dithered, default) or 'original' (crisp 256-colour pixels); ?display=original overrides. */
+  static savedMode(): DisplayMode {
+    const q = new URLSearchParams(location.search).get('display');
+    const v = q ?? localStorage.getItem('bdb-display');
+    return v === 'original' ? 'original' : 'smooth';
+  }
+
+  get mode(): DisplayMode {
+    return this.presenter.mode;
+  }
+  set mode(m: DisplayMode) {
+    this.presenter.mode = m;
+    localStorage.setItem('bdb-display', m);
+  }
 
   add(f: Form) {
     if (!this.forms.includes(f)) this.forms.push(f);
@@ -266,8 +281,7 @@ export class Display {
       if (f.visible) this.screen.bitBlt(f.left, f.top, f.width, f.height, f.surface, 0, 0);
     }
     this.overlay?.(this.screen);
-    this.screen.toImageData(this.image);
-    this.ctx.putImageData(this.image, 0, 0);
+    this.presenter.present(this.screen.px, SCREEN_W, SCREEN_H);
   }
 
   /** Topmost visible form under a screen point (respecting modal forms). */

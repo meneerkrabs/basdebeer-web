@@ -18,6 +18,8 @@ class AudioSystem {
     this.ctx = new AudioContext();
     this.master = this.ctx.createGain();
     this.master.connect(this.ctx.destination);
+    // ?mute=1 silences everything (used for automated browser tests)
+    if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('mute')) this.master.gain.value = 0;
   }
 
   /** Must be called from a user gesture once (browser autoplay policy). */

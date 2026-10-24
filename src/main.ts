@@ -4,10 +4,11 @@ import type { Assets, Book } from './engine/assets.ts';
 import { Display } from './engine/vcl.ts';
 import { addIso, ARCHIVE_PAGE, availableBooks, BOOKS, cdFolder, removeIso } from './library.ts';
 import { paaseilandGames } from './games/paaseiland/index.ts';
+import { pirateneilandGames } from './games/pirateneiland/index.ts';
 import type { MinigameRegistry } from './games/types.ts';
 
 const app = document.getElementById('app')!;
-const GAMES: Partial<Record<Book, MinigameRegistry>> = { paaseiland: paaseilandGames };
+const GAMES: Partial<Record<Book, MinigameRegistry>> = { paaseiland: paaseilandGames, pirateneiland: pirateneilandGames };
 
 function showError(e: unknown) {
   console.error(e);
@@ -61,9 +62,15 @@ async function startScreen() {
     } catch (e) { showError(e); }
   };
 
+  const look = el('select', { onchange: () => localStorage.setItem('bdb-display', look.value) },
+    el('option', { value: 'smooth', textContent: 'Glad (korrel van 256 kleuren weggefilterd)' }),
+    el('option', { value: 'original', textContent: 'Origineel (scherpe pixels)' }));
+  look.value = Display.savedMode();
+
   const screen = el('div', { className: 'bdb-start' },
     el('h1', { textContent: 'Bas de Beer' }),
     el('div', { className: 'books' }, ...bookButtons),
+    el('label', { className: 'note' }, 'Beeld: ', look),
     status,
     el('div', { className: 'note', innerHTML: `De spelbestanden worden geladen uit de ISO's op <a href="${ARCHIVE_PAGE}" target="_blank" rel="noopener" style="color:#fc3">archive.org</a> en in je browser bewaard.` }),
     el('details', { className: 'note' },
