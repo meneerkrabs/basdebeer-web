@@ -103,6 +103,69 @@ export class IsoVfs implements Vfs {
   }
 }
 
+/**
+ * Files fetched one by one from the ISO on archive.org. archive.org's archive viewer
+ * (…/download/<item>/<file.iso>/<path inside>) serves single files out of an ISO with CORS
+ * headers, so no proxy and no full ISO download are needed. Fetched files are kept in
+ * Cache Storage, so each file is downloaded only once.
+ */
+export class ArchiveVfs implements Vfs {
+  private files: Record<string, number>;
+  private url: string;
+  private inflight = new Map<string, Promise<ArrayBuffer>>();
+  private cache: Promise<Cache | null>;
+
+  constructor(item: string, iso: string, files: Record<string, number>, root = 'BASWIN') {
+    this.files = files;
+    this.url = `https://archive.org/download/${item}/${encodeURIComponent(iso)}/${root}%2F`;
+    this.cache = 'caches' in globalThis ? caches.open(`bdb-${item}`).catch(() => null) : Promise.resolve(null);
+  }
+
+  list() { return Object.keys(this.files); }
+  size(path: string) { return this.files[path] ?? 0; }
+
+  private urlFor(path: string) {
+    return this.url + path.split('/').map(encodeURIComponent).join('%2F');
+  }
+
+  read(path: string): Promise<ArrayBuffer> {
+    let p = this.inflight.get(path);
+    if (!p) {
+      p = this.fetchCached(path).finally(() => this.inflight.delete(path));
+      this.inflight.set(path, p);
+    }
+    return p;
+  }
+
+  private async fetchCached(path: string): Promise<ArrayBuffer> {
+    if (!(path in this.files)) throw new Error(`not found: ${path}`);
+    const url = this.urlFor(path);
+    const cache = await this.cache;
+    const hit = await cache?.match(url);
+    if (hit) return hit.arrayBuffer();
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`archive.org: HTTP ${res.status} voor ${path}`);
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength !== this.files[path]) throw new Error(`archive.org: onvolledig bestand ${path}`);
+        await cache?.put(url, new Response(buf.slice(0), { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
+        return buf;
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  }
+
+  /** True when a file is already in the local cache. */
+  async cached(path: string): Promise<boolean> {
+    return !!(await (await this.cache)?.match(this.urlFor(path)));
+  }
+}
+
 /** Identify which book an ISO/CD is, from its file list. */
 export function detectBook(files: string[]): 'paaseiland' | 'pirateneiland' | 'noorderlicht' | null {
   const set = new Set(files);

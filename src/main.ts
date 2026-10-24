@@ -2,7 +2,7 @@ import './style.css';
 import { audio } from './engine/audio.ts';
 import type { Assets, Book } from './engine/assets.ts';
 import { Display } from './engine/vcl.ts';
-import { addIso, ARCHIVE_ITEM, ARCHIVE_PROXY, availableBooks, BOOKS, cdFolder, downloadIso } from './library.ts';
+import { addIso, ARCHIVE_PAGE, availableBooks, BOOKS, cdFolder, removeIso } from './library.ts';
 import { paaseilandGames } from './games/paaseiland/index.ts';
 import type { MinigameRegistry } from './games/types.ts';
 
@@ -32,17 +32,17 @@ async function startScreen() {
   const progress = (label: string) => (f: number) => (status.textContent = `${label} ${Math.round(f * 100)}%`);
 
   const bookButtons = BOOKS.map((b) => {
-    const open = books.get(b.id);
+    const entry = books.get(b.id)!;
     return el('button', {
       textContent: b.title,
-      disabled: !open,
-      title: open ? '' : 'Voeg eerst de ISO of CD van dit boek toe',
+      title: entry.source === 'iso' ? 'Van je eigen ISO' : entry.source === 'dev' ? 'Uit public/data (dev)' : 'Van archive.org',
       onclick: async () => {
         await audio.unlock();
-        play(b.id, await open!());
+        play(b.id, await entry.open());
       },
     });
   });
+  const ownIsos = BOOKS.filter((b) => books.get(b.id)?.source === 'iso');
 
   const isoInput = el('input', { type: 'file', accept: '.iso,.ISO', multiple: true, hidden: true });
   isoInput.onchange = async () => {
@@ -61,28 +61,18 @@ async function startScreen() {
     } catch (e) { showError(e); }
   };
 
-  const archiveButtons = BOOKS.filter((b) => !books.has(b.id)).map((b) =>
-    el('button', {
-      textContent: `${b.title} downloaden`,
-      disabled: !ARCHIVE_PROXY,
-      title: ARCHIVE_PROXY ? '' : 'Geen download-proxy ingesteld (archive.org staat directe downloads vanuit de browser niet toe)',
-      onclick: async () => {
-        if (!confirm(`De ISO van "${b.title}" wordt gedownload van archive.org (${ARCHIVE_ITEM}) en in deze browser bewaard. Doorgaan?`)) return;
-        try { await downloadIso(b.id, progress(b.title)); } catch (e) { showError(e); }
-        startScreen();
-      },
-    }),
-  );
-
   const screen = el('div', { className: 'bdb-start' },
     el('h1', { textContent: 'Bas de Beer' }),
     el('div', { className: 'books' }, ...bookButtons),
-    el('div', { className: 'books' },
-      el('button', { textContent: 'ISO-bestand kiezen…', onclick: () => isoInput.click() }),
-      el('button', { textContent: 'CD-map kiezen…', onclick: () => dirInput.click() }),
-      ...archiveButtons),
     status,
-    el('div', { className: 'note', innerHTML: `Je hebt de originele CD-ROM's nodig (of de ISO's van <a href="${ARCHIVE_ITEM}" target="_blank" rel="noopener" style="color:#fc3">archive.org</a>). Je kunt een ISO ook hierheen slepen. De bestanden blijven in je eigen browser.` }),
+    el('div', { className: 'note', innerHTML: `De spelbestanden worden geladen uit de ISO's op <a href="${ARCHIVE_PAGE}" target="_blank" rel="noopener" style="color:#fc3">archive.org</a> en in je browser bewaard.` }),
+    el('details', { className: 'note' },
+      el('summary', { textContent: 'Eigen CD of ISO gebruiken' }),
+      el('div', { className: 'books' },
+        el('button', { textContent: 'ISO-bestand kiezen…', onclick: () => isoInput.click() }),
+        el('button', { textContent: 'CD-map kiezen…', onclick: () => dirInput.click() }),
+        ...ownIsos.map((b) => el('button', { textContent: `${b.title}: eigen ISO verwijderen`, onclick: async () => { await removeIso(b.id); startScreen(); } }))),
+      'Je kunt een ISO ook hierheen slepen.'),
     isoInput, dirInput,
   );
   screen.ondragover = (e) => e.preventDefault();
@@ -118,15 +108,13 @@ async function play(book: Book, assets: Assets) {
 }
 
 async function boot() {
-  // dev shortcut: ?book=paaseiland&game=2 opens a minigame directly (click once to enable sound)
+  // ?book=paaseiland (&game=2) opens a book / minigame directly (click once to enable sound)
   const params = new URLSearchParams(location.search);
   const book = params.get('book') as Book | null;
-  if (import.meta.env.DEV && book) {
-    const open = (await availableBooks()).get(book);
-    if (open) {
-      addEventListener('pointerdown', () => audio.unlock(), { once: true });
-      return play(book, await open());
-    }
+  const entry = book && (await availableBooks()).get(book);
+  if (book && entry) {
+    addEventListener('pointerdown', () => audio.unlock(), { once: true });
+    return play(book, await entry.open());
   }
   return startScreen();
 }

@@ -2,7 +2,7 @@
 // Origin Private File System so they only have to be loaded once.
 
 import { Assets, type Book } from './engine/assets.ts';
-import { detectBook, FileListVfs, HttpVfs, IsoVfs, type Vfs } from './engine/vfs.ts';
+import { ArchiveVfs, detectBook, FileListVfs, HttpVfs, IsoVfs, type Vfs } from './engine/vfs.ts';
 
 export const BOOKS: { id: Book; title: string; iso: string }[] = [
   { id: 'paaseiland', title: 'Naar Paaseiland', iso: 'BAS DE BEER - COLLECTIE - NAAR PAASEILAND.ISO' },
@@ -10,30 +10,46 @@ export const BOOKS: { id: Book; title: string; iso: string }[] = [
   { id: 'noorderlicht', title: 'Naar het Noorderlicht', iso: 'BAS DE BEER - COLLECTIE - NAAR HET NOORDERLICHT.ISO' },
 ];
 
-export const ARCHIVE_ITEM = 'https://archive.org/details/bas-de-beer-collectie';
-/** Optional CORS proxy for archive.org downloads (archive.org itself sends no CORS headers). */
-export const ARCHIVE_PROXY: string | undefined = import.meta.env.VITE_ARCHIVE_PROXY;
+export const ARCHIVE_ITEM = 'bas-de-beer-collectie';
+export const ARCHIVE_PAGE = `https://archive.org/details/${ARCHIVE_ITEM}`;
+
+const MANIFESTS: Record<Book, () => Promise<{ default: Record<string, number> }>> = {
+  paaseiland: () => import('./data/paaseiland.files.json'),
+  pirateneiland: () => import('./data/pirateneiland.files.json'),
+  noorderlicht: () => import('./data/noorderlicht.files.json'),
+};
+
+export type BookSource = 'iso' | 'dev' | 'archive';
 
 const opfsDir = async () => (await navigator.storage.getDirectory()).getDirectoryHandle('isos', { create: true });
 
 /** Books available in this browser (OPFS-stored ISO, or dev-extracted files). */
-export async function availableBooks(): Promise<Map<Book, () => Promise<Assets>>> {
-  const out = new Map<Book, () => Promise<Assets>>();
+export async function availableBooks(): Promise<Map<Book, { source: BookSource; open: () => Promise<Assets> }>> {
+  const out = new Map<Book, { source: BookSource; open: () => Promise<Assets> }>();
   try {
     const dir = await opfsDir();
     for (const b of BOOKS) {
       const h = await dir.getFileHandle(`${b.id}.iso`).catch(() => null);
-      if (h) out.set(b.id, async () => new Assets(b.id, await IsoVfs.open(await h.getFile())));
+      if (h) out.set(b.id, { source: 'iso', open: async () => new Assets(b.id, await IsoVfs.open(await h.getFile())) });
     }
   } catch (e) {
     console.warn('OPFS niet beschikbaar', e);
   }
-  if (import.meta.env.DEV) {
+  // dev: prefer files from public/data (tools/extract.mjs) unless ?source=archive
+  if (import.meta.env.DEV && new URLSearchParams(location.search).get('source') !== 'archive') {
     for (const b of BOOKS) {
       if (out.has(b.id)) continue;
       const vfs = await HttpVfs.open(`${import.meta.env.BASE_URL}data/${b.id}/`);
-      if (vfs) out.set(b.id, async () => new Assets(b.id, vfs));
+      if (vfs) out.set(b.id, { source: 'dev', open: async () => new Assets(b.id, vfs) });
     }
+  }
+  // default: stream the files from the ISO on archive.org
+  for (const b of BOOKS) {
+    if (out.has(b.id)) continue;
+    out.set(b.id, {
+      source: 'archive',
+      open: async () => new Assets(b.id, new ArchiveVfs(ARCHIVE_ITEM, b.iso, (await MANIFESTS[b.id]()).default)),
+    });
   }
   return out;
 }
@@ -52,38 +68,6 @@ export async function addIso(file: Blob, onProgress?: (f: number) => void): Prom
     onProgress?.(Math.min(1, (o + CHUNK) / file.size));
   }
   await w.close();
-  return book;
-}
-
-/** Download an ISO from archive.org through the configured proxy, then store it. */
-export async function downloadIso(book: Book, onProgress?: (f: number) => void): Promise<Book> {
-  if (!ARCHIVE_PROXY) throw new Error('Geen download-proxy ingesteld.');
-  const b = BOOKS.find((x) => x.id === book)!;
-  const res = await fetch(`${ARCHIVE_PROXY}/${encodeURIComponent(b.iso)}`);
-  if (!res.ok || !res.body) throw new Error(`Download mislukt (HTTP ${res.status}).`);
-  const total = Number(res.headers.get('content-length')) || 0;
-  // stream straight into OPFS (the ISOs are 150-380 MB), validate afterwards
-  const dir = await opfsDir();
-  const h = await dir.getFileHandle(`${book}.iso`, { create: true });
-  const w = await h.createWritable();
-  let got = 0;
-  const reader = res.body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      await w.write(value as Uint8Array<ArrayBuffer>);
-      got += value.length;
-      if (total) onProgress?.(got / total);
-    }
-    await w.close();
-    const found = detectBook((await IsoVfs.open(await h.getFile())).list());
-    if (found !== book) throw new Error('De gedownloade ISO is niet het verwachte boek.');
-  } catch (e) {
-    await w.abort().catch(() => {});
-    await dir.removeEntry(`${book}.iso`).catch(() => {});
-    throw e;
-  }
   return book;
 }
 
