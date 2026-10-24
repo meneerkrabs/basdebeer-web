@@ -466,19 +466,35 @@ export class Display {
   }
 
   private loadingEl: HTMLElement | null = null;
-  private loadingCount = 0;
+  private loadingTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Show a small "Laden…" badge while game files are being fetched (counted, so calls may nest). */
+  /** Kept for the books: loading feedback now comes from `progress()` (driven by Assets.onProgress). */
   async whileLoading<T>(work: Promise<T>): Promise<T> {
-    if (this.loadingCount++ === 0) {
-      const el = (this.loadingEl ??= Object.assign(document.createElement('div'), { className: 'bdb-loading', textContent: 'Laden…' }));
-      // only show it when loading takes a noticeable time (cached files load instantly)
-      setTimeout(() => { if (this.loadingCount > 0) this.root.appendChild(el); }, 400);
+    return work;
+  }
+
+  /** Show a loading bar while game files are being fetched; (0, 0) hides it. Appears only after 300 ms. */
+  progress(done: number, total: number) {
+    if (total <= 0) {
+      if (this.loadingTimer !== null) clearTimeout(this.loadingTimer);
+      this.loadingTimer = null;
+      this.loadingEl?.remove();
+      return;
     }
-    try {
-      return await work;
-    } finally {
-      if (--this.loadingCount === 0) this.loadingEl?.remove();
+    if (!this.loadingEl) {
+      const el = document.createElement('div');
+      el.className = 'bdb-loading';
+      el.innerHTML = '<span class="bdb-loading-label">Laden…</span><div class="bdb-loading-track"><div class="bdb-loading-bar"></div></div>';
+      this.loadingEl = el;
+    }
+    const f = Math.max(0, Math.min(1, done / total));
+    (this.loadingEl.querySelector('.bdb-loading-bar') as HTMLElement).style.width = `${(f * 100).toFixed(1)}%`;
+    (this.loadingEl.querySelector('.bdb-loading-label') as HTMLElement).textContent = `Laden… ${Math.floor(f * 100)}%`;
+    if (!this.loadingEl.isConnected && this.loadingTimer === null) {
+      this.loadingTimer = setTimeout(() => {
+        this.loadingTimer = null;
+        if (this.loadingEl) this.root.appendChild(this.loadingEl);
+      }, 300);
     }
   }
 

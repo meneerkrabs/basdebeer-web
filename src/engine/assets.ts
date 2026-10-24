@@ -44,10 +44,33 @@ export class Assets {
     return this.path(name) !== null || this.path(name + '.TXT') !== null;
   }
 
-  async raw(name: string): Promise<ArrayBuffer> {
+  /** Progress of files the game is waiting for (not background prefetches), in bytes; (0, 0) = idle. */
+  onProgress: ((done: number, total: number) => void) | null = null;
+  private fg = { done: 0, total: 0 };
+  private fgGen = 0;
+
+  async raw(name: string, quiet = false): Promise<ArrayBuffer> {
     const p = this.path(name);
     if (!p) throw new Error(`bestand niet gevonden: ${name}`);
-    return this.vfs.read(p);
+    if (quiet || !this.vfs.remote) return this.vfs.read(p);
+    const size = (this.vfs as { size?(path: string): number }).size?.(p) || 1;
+    this.fg.total += size;
+    this.onProgress?.(this.fg.done, this.fg.total);
+    let seen = 0;
+    const gen = this.fgGen;
+    try {
+      return await this.vfs.read(p, (n) => {
+        if (gen !== this.fgGen) return;
+        const d = Math.min(n, size) - seen;
+        seen += d;
+        this.fg.done += d;
+        this.onProgress?.(this.fg.done, this.fg.total);
+      });
+    } finally {
+      if (gen === this.fgGen) this.fg.done += size - seen;
+      if (this.fg.done >= this.fg.total) { this.fg = { done: 0, total: 0 }; this.fgGen++; }
+      this.onProgress?.(this.fg.done, this.fg.total);
+    }
   }
 
   /** Load a BMP as a Surface (cached and shared: clone before drawing into it). */
@@ -79,10 +102,10 @@ export class Assets {
     return text;
   }
 
-  private async scriptText(name: string): Promise<string> {
+  private async scriptText(name: string, quiet = false): Promise<string> {
     const k = name.trim().toUpperCase();
-    if (this.path(k)) return decodeBsb(await this.raw(k));
-    return new TextDecoder('utf-8').decode(await this.raw(k + '.TXT'));
+    if (this.path(k)) return decodeBsb(await this.raw(k, quiet));
+    return new TextDecoder('utf-8').decode(await this.raw(k + '.TXT', quiet));
   }
 
   // ---- prefetching (remote sources only): while a page plays, fetch the next page(s)
@@ -125,11 +148,11 @@ export class Assets {
 
   private prefetchAround(name: string, text: string) {
     if (!this.vfs.remote) return;
-    for (const f of Assets.filesIn(text)) if (this.path(f)) this.enqueue(f, () => this.raw(f));
+    for (const f of Assets.filesIn(text)) if (this.path(f)) this.enqueue(f, () => this.raw(f, true));
     for (const next of this.nextScripts(name, text)) {
       this.enqueue(`script:${next}`, async () => {
-        const t = await this.scriptText(next);
-        for (const f of Assets.filesIn(t)) if (this.path(f)) this.enqueue(f, () => this.raw(f));
+        const t = await this.scriptText(next, true);
+        for (const f of Assets.filesIn(t)) if (this.path(f)) this.enqueue(f, () => this.raw(f, true));
       });
     }
   }

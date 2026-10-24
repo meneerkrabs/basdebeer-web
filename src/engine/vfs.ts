@@ -5,7 +5,8 @@
 export interface Vfs {
   /** All files, upper-case relative paths. */
   list(): string[];
-  read(path: string): Promise<ArrayBuffer>;
+  /** Read a file; `onBytes` (optional) reports bytes received so far while downloading. */
+  read(path: string, onBytes?: (received: number) => void): Promise<ArrayBuffer>;
   /** A file outside BASWIN, in the CD root (e.g. HELPBOEK.TXT). */
   readRoot?(name: string): Promise<ArrayBuffer>;
   /** Files come from the network one by one (prefetching pays off). */
@@ -162,13 +163,42 @@ export class ArchiveVfs implements Vfs {
     throw new Error(`archive.org: ${name} niet gevonden`);
   }
 
-  read(path: string): Promise<ArrayBuffer> {
+  private listeners = new Map<string, Set<(n: number) => void>>();
+
+  read(path: string, onBytes?: (received: number) => void): Promise<ArrayBuffer> {
+    if (onBytes) {
+      const set = this.listeners.get(path) ?? new Set();
+      set.add(onBytes);
+      this.listeners.set(path, set);
+    }
     let p = this.inflight.get(path);
     if (!p) {
-      p = this.fetchCached(path).finally(() => this.inflight.delete(path));
+      p = this.fetchCached(path).finally(() => {
+        this.inflight.delete(path);
+        this.listeners.delete(path);
+      });
       this.inflight.set(path, p);
     }
     return p;
+  }
+
+  /** Read a response body, reporting progress to everyone waiting for this file. */
+  private async readBody(res: Response, path: string): Promise<ArrayBuffer> {
+    if (!res.body) return res.arrayBuffer();
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      n += value.length;
+      for (const f of this.listeners.get(path) ?? []) f(n);
+    }
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out.buffer;
   }
 
   private async fetchCached(path: string): Promise<ArrayBuffer> {
@@ -189,7 +219,7 @@ export class ArchiveVfs implements Vfs {
           throw new Error(`archive.org: HTTP ${res.status} voor ${path}`);
         }
         if (!direct) this.learnDirectBase(res.url);
-        const buf = await res.arrayBuffer();
+        const buf = await this.readBody(res, path);
         if (buf.byteLength !== this.files[path]) throw new Error(`archive.org: onvolledig bestand ${path}`);
         await cache?.put(url, new Response(buf.slice(0), { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
         return buf;
