@@ -96,6 +96,7 @@ class PaaseilandBook {
   private hourglass = true;
   private hover = -1;
   private mainImage: Surface | null = null;
+  loadedScene = -1;
 
   // animation slots: 1..3 are the bee (BijUit, BijIn, Bij)
   private anims: (Anim | null)[] = [null];
@@ -294,6 +295,7 @@ class PaaseilandBook {
       if (line.startsWith('{LABEL}')) this.labels.push({ name: line.slice(7, line.length - 1).slice(0, 20), line: i });
     });
     await this.display.whileLoading(this.preload());
+    this.loadedScene = n; // (for tests)
     this.lineIdx = 0;
     this.nextClicks = 0;
     this.back.fillRect(0, 0, 640, 480, 0);

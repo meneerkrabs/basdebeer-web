@@ -8,6 +8,8 @@ export interface Vfs {
   read(path: string): Promise<ArrayBuffer>;
   /** A file outside BASWIN, in the CD root (e.g. HELPBOEK.TXT). */
   readRoot?(name: string): Promise<ArrayBuffer>;
+  /** Files come from the network one by one (prefetching pays off). */
+  readonly remote?: boolean;
 }
 
 /** Dev convenience: files extracted by tools/extract.mjs into public/data/<game>/ (with manifest.json). */
@@ -178,8 +180,15 @@ export class ArchiveVfs implements Vfs {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`archive.org: HTTP ${res.status} voor ${path}`);
+        // archive.org/download/... redirects to the data server holding the ISO; once that
+        // server is known, ask it directly (saves a round trip per file, ~0.6 s)
+        const direct = this.directBase && attempt === 0 ? this.directBase + encodeURIComponent(`BASWIN/${path}`) : null;
+        const res = await fetch(direct ?? url);
+        if (!res.ok) {
+          if (direct) this.directBase = null;
+          throw new Error(`archive.org: HTTP ${res.status} voor ${path}`);
+        }
+        if (!direct) this.learnDirectBase(res.url);
         const buf = await res.arrayBuffer();
         if (buf.byteLength !== this.files[path]) throw new Error(`archive.org: onvolledig bestand ${path}`);
         await cache?.put(url, new Response(buf.slice(0), { headers: { 'content-type': 'application/octet-stream' } })).catch(() => {});
@@ -191,6 +200,17 @@ export class ArchiveVfs implements Vfs {
     }
     throw lastErr;
   }
+
+  /** "https://iaNNN.us.archive.org/view_archive.php?archive=...&file=" (null until known). */
+  private directBase: string | null = null;
+
+  private learnDirectBase(finalUrl: string) {
+    const i = finalUrl.indexOf('&file=');
+    if (finalUrl.includes('view_archive.php') && i > 0) this.directBase = finalUrl.slice(0, i + 6);
+  }
+
+  /** Worth prefetching: files come from the network one by one. */
+  readonly remote = true;
 
   /** True when a file is already in the local cache. */
   async cached(path: string): Promise<boolean> {

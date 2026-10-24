@@ -74,9 +74,64 @@ export class Assets {
 
   /** A decoded script (.BSB). Dev extracts may already contain decoded "<name>.TXT". */
   async script(name: string): Promise<string> {
+    const text = await this.scriptText(name);
+    this.prefetchAround(name, text);
+    return text;
+  }
+
+  private async scriptText(name: string): Promise<string> {
     const k = name.trim().toUpperCase();
     if (this.path(k)) return decodeBsb(await this.raw(k));
     return new TextDecoder('utf-8').decode(await this.raw(k + '.TXT'));
+  }
+
+  // ---- prefetching (remote sources only): while a page plays, fetch the next page(s)
+
+  private prefetched = new Set<string>();
+  private queue: (() => Promise<unknown>)[] = [];
+  private running = 0;
+
+  private enqueue(key: string, job: () => Promise<unknown>) {
+    if (this.prefetched.has(key)) return;
+    this.prefetched.add(key);
+    this.queue.push(job);
+    this.pump();
+  }
+
+  private pump() {
+    while (this.running < 4 && this.queue.length) {
+      const job = this.queue.shift()!;
+      this.running++;
+      job().catch(() => {}).finally(() => { this.running--; this.pump(); });
+    }
+  }
+
+  private static filesIn(text: string): string[] {
+    return [...new Set([...text.matchAll(/[\w-]+\.(?:BMP|WAV|AVI|MID)/gi)].map((m) => m[0].toUpperCase()))];
+  }
+
+  /** Scripts a page can continue to ({NEXT_SCENE}), as file names that exist. */
+  private nextScripts(name: string, text: string): string[] {
+    const suffix = /\d[A-Z]*?([ND])\.BSB$/i.exec(name)?.[1]?.toUpperCase() ?? ''; // Noorderlicht N/D pages
+    const out: string[] = [];
+    for (const m of text.matchAll(/\{NEXT_SCENE\}([^~\r\n]+)~/g)) {
+      const v = m[1].trim().toUpperCase();
+      const candidates = /^\d+$/.test(v) ? [`${v.padStart(3, '0')}.BSB`, `${v}${suffix}.BSB`, `${v}N.BSB`] : [`${v}${suffix}.BSB`, `${v}.BSB`, `${v}N.BSB`];
+      const hit = candidates.find((c) => this.has(c));
+      if (hit) out.push(hit);
+    }
+    return [...new Set(out)];
+  }
+
+  private prefetchAround(name: string, text: string) {
+    if (!this.vfs.remote) return;
+    for (const f of Assets.filesIn(text)) if (this.path(f)) this.enqueue(f, () => this.raw(f));
+    for (const next of this.nextScripts(name, text)) {
+      this.enqueue(`script:${next}`, async () => {
+        const t = await this.scriptText(next);
+        for (const f of Assets.filesIn(t)) if (this.path(f)) this.enqueue(f, () => this.raw(f));
+      });
+    }
   }
 
   /** A cp1252 text file from the CD root (outside BASWIN). */
