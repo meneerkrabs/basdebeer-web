@@ -5,10 +5,11 @@ import { Display } from './engine/vcl.ts';
 import { addIso, ARCHIVE_PAGE, availableBooks, BOOKS, cdFolder, removeIso } from './library.ts';
 import { paaseilandGames } from './games/paaseiland/index.ts';
 import { pirateneilandGames } from './games/pirateneiland/index.ts';
+import { noorderlichtGames } from './games/noorderlicht/index.ts';
 import type { MinigameRegistry } from './games/types.ts';
 
 const app = document.getElementById('app')!;
-const GAMES: Partial<Record<Book, MinigameRegistry>> = { paaseiland: paaseilandGames, pirateneiland: pirateneilandGames };
+const GAMES: Partial<Record<Book, MinigameRegistry>> = { paaseiland: paaseilandGames, pirateneiland: pirateneilandGames, noorderlicht: noorderlichtGames };
 
 function showError(e: unknown) {
   console.error(e);
@@ -114,6 +115,10 @@ async function play(book: Book, assets: Assets) {
   if (book === 'paaseiland' && !params.has('spellen')) {
     const { runPaaseiland } = await import('./books/paaseiland/book.ts');
     await runPaaseiland(display, assets);
+  } else if (book === 'pirateneiland' && !params.has('spellen')) {
+    // the CD menu (Autorun.exe) leads to the book, BerenSpellen and BerenBios
+    const { runPirateneilandMenu } = await import('./books/pirateneiland/launcher.ts');
+    await runPirateneilandMenu(display, assets);
   } else {
     // story engines still being ported (or ?spellen): offer the minigames directly
     const { runGameMenu } = await import('./game-menu.ts');

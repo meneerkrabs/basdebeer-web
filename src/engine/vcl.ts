@@ -2,7 +2,7 @@
 // (each with its own retained backing surface), timers, modal forms, mouse/keyboard
 // routing, Delphi's Random(), and an overlay for AVI playback (TMediaPlayer + Display).
 
-import { Surface } from './surface.ts';
+import { cssColor, cssFont, Surface } from './surface.ts';
 import { createPresenter, type DisplayMode, type Presenter } from './presenter.ts';
 
 /** Default "monitor" size; Display can be created larger (Noorderlicht is 800x600). */
@@ -229,7 +229,10 @@ export class Display {
     this.video.hidden = true;
     root.appendChild(this.video);
     this.presenter = createPresenter(this.canvas, Display.savedMode());
-    Surface.smoothStipple = this.presenter.mode === 'smooth';
+    Surface.smoothStipple = Surface.hiResText = this.presenter.mode === 'smooth';
+    this.textLayer = document.createElement('canvas');
+    this.textLayer.className = 'bdb-text';
+    root.appendChild(this.textLayer);
     this.bindInput();
     this.layout();
     addEventListener('resize', () => this.layout());
@@ -246,6 +249,11 @@ export class Display {
     const w = Math.floor(this.width * scale), h = Math.floor(this.height * scale);
     Object.assign(this.canvas.style, { width: `${w}px`, height: `${h}px` });
     this.presenter.resize(w, h);
+    const dpr = devicePixelRatio || 1;
+    this.textLayer.width = Math.round(w * dpr);
+    this.textLayer.height = Math.round(h * dpr);
+    const cr = this.canvas.getBoundingClientRect(), pr = this.root.getBoundingClientRect();
+    Object.assign(this.textLayer.style, { width: `${w}px`, height: `${h}px`, left: `${cr.left - pr.left}px`, top: `${cr.top - pr.top}px` });
     this.scale = scale;
     this.positionVideo();
     this.positionControls();
@@ -265,7 +273,7 @@ export class Display {
   }
   set mode(m: DisplayMode) {
     this.presenter.mode = m;
-    Surface.smoothStipple = m === 'smooth';
+    Surface.smoothStipple = Surface.hiResText = m === 'smooth';
     localStorage.setItem('bdb-display', m);
   }
 
@@ -290,11 +298,41 @@ export class Display {
   private present() {
     for (const f of this.forms) if (f.visible && f.needsPaint) f.repaint();
     this.screen.px.fill(0);
+    this.screen.textRuns = [];
+    // forms are composited bottom to top; a form on top covers the text runs beneath it
     for (const f of this.forms) {
       if (f.visible) this.screen.bitBlt(f.left, f.top, f.width, f.height, f.surface, 0, 0);
     }
     this.overlay?.(this.screen);
     this.presenter.present(this.screen.px, this.width, this.height);
+    this.drawText();
+  }
+
+  private readonly textLayer: HTMLCanvasElement;
+  private lastTextKey = '';
+
+  /** Draw the screen's text runs (Surface.hiResText) sharp, at device resolution. */
+  private drawText() {
+    const runs = this.screen.textRuns;
+    const key = runs.map((r) => `${r.x},${r.y},${r.text},${r.font.color},${r.clip}`).join('|') + `@${this.textLayer.width}`;
+    if (key === this.lastTextKey) return;
+    this.lastTextKey = key;
+    const ctx = this.textLayer.getContext('2d')!;
+    ctx.clearRect(0, 0, this.textLayer.width, this.textLayer.height);
+    const k = this.textLayer.width / this.width;
+    ctx.textBaseline = 'alphabetic';
+    for (const r of runs) {
+      ctx.save();
+      const c = r.clip ?? [0, 0, this.width, this.height];
+      ctx.beginPath();
+      ctx.rect(c[0] * k, c[1] * k, (c[2] - c[0]) * k, (c[3] - c[1]) * k);
+      ctx.clip();
+      ctx.font = cssFont({ ...r.font, px: r.font.px * k });
+      ctx.fillStyle = cssColor(r.font.color);
+      ctx.fillText(r.text, r.x * k, (r.y + Math.ceil(r.font.px * 0.9)) * k);
+      if (r.font.underline) ctx.fillRect(r.x * k, (r.y + Math.ceil(r.font.px * 0.9) + 1) * k, (r.w ?? 0) * k, Math.max(1, (r.font.px / 14) * k));
+      ctx.restore();
+    }
   }
 
   /** Topmost visible form under a screen point (respecting modal forms). */
@@ -376,6 +414,23 @@ export class Display {
       v.onclick = opts.skippable ? done : null;
       v.play().catch(done);
     });
+  }
+
+  private loadingEl: HTMLElement | null = null;
+  private loadingCount = 0;
+
+  /** Show a small "Laden…" badge while game files are being fetched (counted, so calls may nest). */
+  async whileLoading<T>(work: Promise<T>): Promise<T> {
+    if (this.loadingCount++ === 0) {
+      const el = (this.loadingEl ??= Object.assign(document.createElement('div'), { className: 'bdb-loading', textContent: 'Laden…' }));
+      // only show it when loading takes a noticeable time (cached files load instantly)
+      setTimeout(() => { if (this.loadingCount > 0) this.root.appendChild(el); }, 400);
+    }
+    try {
+      return await work;
+    } finally {
+      if (--this.loadingCount === 0) this.loadingEl?.remove();
+    }
   }
 
   private controls: { el: HTMLElement; rect: [number, number, number, number] }[] = [];

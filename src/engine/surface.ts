@@ -65,6 +65,22 @@ function textCtx(): OffscreenCanvasRenderingContext2D {
   return measureCtx;
 }
 
+/**
+ * A piece of text drawn with textOut while Surface.hiResText is on. It is not rasterised into
+ * the 640x480 pixels; the Display draws it at screen resolution instead. Runs travel with
+ * the pixels they stand for (BitBlt copies them, opaque fills/copies over them remove them).
+ */
+export interface TextRun {
+  x: number;
+  y: number;
+  text: string;
+  font: FontSpec;
+  /** Visible area (this surface's coordinates), from blits that clipped the run. */
+  clip: [number, number, number, number] | null;
+  /** Cached text width. */
+  w?: number;
+}
+
 /** Per-pixel weight of a stippled SRCAND mask (see Surface.smoothStipple); NaN = not stipple. */
 interface PendingStipple { surface: Surface; dx: number; dy: number; w: number; h: number; white: Float32Array }
 let pendingStipple: PendingStipple | null = null;
@@ -76,6 +92,11 @@ export class Surface {
    * blend with the matching SRCPAINT instead, which reads as a soft shadow.
    */
   static smoothStipple = false;
+  /** 'Smooth' display mode: keep text as runs and let the Display draw it sharp (see TextRun). */
+  static hiResText = false;
+
+  /** Text runs on this surface (only used when hiResText is on). */
+  textRuns: TextRun[] = [];
 
   readonly width: number;
   readonly height: number;
@@ -97,7 +118,44 @@ export class Surface {
     s.px.set(this.px);
     s.palette = this.palette;
     s.indices = this.indices;
+    s.textRuns = this.textRuns.map((r) => ({ ...r }));
     return s;
+  }
+
+  /** Bounding box of a run, intersected with its clip. */
+  static runBox(r: TextRun): [number, number, number, number] {
+    const w = (r.w ??= Surface.textWidth(r.text, r.font)), h = Math.ceil(r.font.px * 1.2);
+    let b: [number, number, number, number] = [r.x, r.y, r.x + w, r.y + h];
+    if (r.clip) b = [Math.max(b[0], r.clip[0]), Math.max(b[1], r.clip[1]), Math.min(b[2], r.clip[2]), Math.min(b[3], r.clip[3])];
+    return b;
+  }
+
+  /** An opaque write to (x1,y1)-(x2,y2) covers the runs whose visible centre lies inside it. */
+  private coverRuns(x1: number, y1: number, x2: number, y2: number) {
+    if (!this.textRuns.length) return;
+    this.textRuns = this.textRuns.filter((r) => {
+      const b = Surface.runBox(r);
+      if (b[2] <= b[0] || b[3] <= b[1]) return false;
+      const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+      return !(cx >= x1 && cx < x2 && cy >= y1 && cy < y2);
+    });
+  }
+
+  /** Copy the runs of src's (sx,sy,w,h) to (dx,dy), clipped to the destination rect. */
+  private copyRuns(src: Surface, dx: number, dy: number, w: number, h: number, sx: number, sy: number) {
+    const ox = dx - sx, oy = dy - sy;
+    for (const r of src.textRuns) {
+      const b = Surface.runBox(r);
+      if (b[2] <= sx || b[0] >= sx + w || b[3] <= sy || b[1] >= sy + h) continue;
+      const c = r.clip ?? [-1e9, -1e9, 1e9, 1e9];
+      const clip: [number, number, number, number] = [
+        Math.max(c[0] + ox, dx), Math.max(c[1] + oy, dy), Math.min(c[2] + ox, dx + w), Math.min(c[3] + oy, dy + h),
+      ];
+      const run = { ...r, x: r.x + ox, y: r.y + oy, clip };
+      // a word redrawn at the same spot (e.g. highlighted) replaces the old run
+      this.textRuns = this.textRuns.filter((o) => !(o.x === run.x && o.y === run.y && o.text === run.text));
+      this.textRuns.push(run);
+    }
   }
 
   getPixel(x: number, y: number): number {
@@ -114,6 +172,7 @@ export class Surface {
     const ax = Math.max(0, x1 | 0), ay = Math.max(0, y1 | 0);
     const bx = Math.min(this.width, x2 | 0), by = Math.min(this.height, y2 | 0);
     for (let y = ay; y < by; y++) this.px.fill(color & 0xffffff, y * this.width + ax, y * this.width + bx);
+    this.coverRuns(ax, ay, bx, by);
   }
 
   /** Win32 Rectangle/FrameRect-style outline (right/bottom exclusive). */
@@ -140,6 +199,10 @@ export class Surface {
       if (sy + h > src.height) h = src.height - sy;
     }
     if (w <= 0 || h <= 0) return;
+    if (this.textRuns.length || src?.textRuns.length) {
+      if (rop === SRCCOPY || rop === NOTSRCCOPY || rop === BLACKNESS || rop === WHITENESS) this.coverRuns(dx, dy, dx + w, dy + h);
+      if (src?.textRuns.length && (rop === SRCCOPY || rop === SRCPAINT || rop === SRCINVERT)) this.copyRuns(src, dx, dy, w, h, sx, sy);
+    }
     if (Surface.smoothStipple && src) {
       if (rop === SRCAND && this.stippleAnd(dx, dy, w, h, src, sx, sy)) return;
       if (rop === SRCPAINT && this.stipplePaint(dx, dy, w, h, src, sx, sy)) return;
@@ -295,6 +358,13 @@ export class Surface {
 
   /** Draw text (TextOut). Antialiasing is thresholded away to mimic 1990s GDI rendering. */
   textOut(x: number, y: number, text: string, font: FontSpec, bgColor: number | null = null): { w: number; h: number } {
+    if (Surface.hiResText) {
+      const w = Surface.textWidth(text, font), h = Math.ceil(font.px * 1.2);
+      if (bgColor !== null) this.fillRect(x, y, x + w, y + h, bgColor);
+      this.textRuns = this.textRuns.filter((o) => !(o.x === x && o.y === y && o.text === text));
+      if (text.trim()) this.textRuns.push({ x, y, text, font: { ...font }, clip: null, w });
+      return { w, h };
+    }
     const ctx = textCtx();
     ctx.font = cssFont(font);
     const m = ctx.measureText(text);

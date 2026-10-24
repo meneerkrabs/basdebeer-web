@@ -13,3 +13,6 @@ html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family
 .bdb-control { position: absolute; box-sizing: border-box; z-index: 5; }
 .bdb-help-memo { font-family: "MS Sans Serif", Tahoma, Arial, sans-serif; resize: none; background: #fff; color: #000; border: 2px inset #ccc; padding: 2px; }
 .bdb-help-ok { font-family: "MS Sans Serif", Tahoma, Arial, sans-serif; background: #c0c0c0; border: 2px outset #eee; color: #000; cursor: pointer; padding: 0; }
+.bdb-loading { position: absolute; right: 1rem; bottom: 1rem; z-index: 6; padding: 0.5rem 0.9rem; border-radius: 999px; background: rgba(0, 0, 0, 0.7); color: #fc3; font: bold 1rem Arial, sans-serif; pointer-events: none; animation: bdb-pulse 1.2s ease-in-out infinite; }
+@keyframes bdb-pulse { 50% { opacity: 0.45; } }
+.bdb-text { position: absolute; pointer-events: none; z-index: 2; }

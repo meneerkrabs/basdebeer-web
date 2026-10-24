@@ -2,6 +2,7 @@
 // 8-bit decoder and unsigned 8/16-bit PCM audio. The Bas de Beer movies are all
 // msvideo1 pal8 at 15 fps with 22 kHz mono u8 PCM.
 
+import { audio } from './audio.ts';
 import { rgb, Surface } from './surface.ts';
 
 interface Chunk { off: number; size: number }
@@ -178,4 +179,40 @@ export class Avi {
       }
     }
   }
+}
+
+/** Play an AVI into a surface at (x,y), native size, with its audio; frame timing follows the audio clock. */
+export function playAvi(avi: Avi, target: Surface, x: number, y: number): { stop: () => void; playing: boolean } {
+  const frame = new Surface(avi.width, avi.height);
+  const samples = avi.audioSamples();
+  let src: AudioBufferSourceNode | null = null;
+  const t0 = audio.ctx.currentTime + 0.05;
+  if (samples) {
+    const buf = audio.ctx.createBuffer(samples.data.length, samples.data[0].length, samples.rate);
+    samples.data.forEach((d, i) => buf.copyToChannel(d as Float32Array<ArrayBuffer>, i));
+    src = audio.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audio.master);
+    src.start(t0);
+  }
+  const state = { playing: true, stop: () => {} };
+  let last = -1;
+  const step = () => {
+    if (!state.playing) return;
+    const t = audio.ctx.currentTime - t0;
+    const n = Math.floor(t * avi.fps);
+    if (n >= avi.frames.length) { state.stop(); return; }
+    if (n >= 0 && n !== last) {
+      avi.frame(n, frame);
+      target.bitBlt(x, y, avi.width, avi.height, frame, 0, 0);
+      last = n;
+    }
+    requestAnimationFrame(step);
+  };
+  state.stop = () => {
+    state.playing = false;
+    try { src?.stop(); } catch { /* not started */ }
+  };
+  requestAnimationFrame(step);
+  return state;
 }

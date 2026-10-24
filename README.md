@@ -31,3 +31,10 @@ node tools/test-avi.ts <bestand.avi>       # vergelijk de MS Video 1-decoder met
 - `src/engine/` — emulatielaag: `surface.ts` (GDI/BitBlt), `vcl.ts` (forms, timers, input, Delphi `Random`), `audio.ts` (`sndPlaySound`, TMediaPlayer), `avi.ts`, `vfs.ts` (ISO9660-lezer), `assets.ts`
 - `src/games/<boek>/` — minispellen, geport uit de gedecompileerde `TfrmGn`-forms
 - `docs/re/` — reverse-engineering-notities per engine
+
+## Credits: MIDI-weergave
+
+De MIDI-bestanden van de games worden in de browser gesynthetiseerd (lazy geladen bij het eerste `playMidi`):
+
+- [spessasynth_lib](https://github.com/spessasus/spessasynth_lib) 4.3.x (Apache-2.0), AudioWorklet SoundFont-synthesizer.
+- SoundFont: [GeneralUser GS](https://github.com/mrbumpy409/GeneralUser-GS) 2.0.3 door S. Christian Collins (`src/assets/GeneralUser-GS.sf2`, 32 MB). Eigen licentie: vrij te gebruiken en te herdistribueren, ook in software en commercieel (zie de licentietekst in het SF2-bestand en in de GeneralUser GS-repo).

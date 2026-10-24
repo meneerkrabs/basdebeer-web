@@ -2,6 +2,8 @@
 //  - sndPlaySound/PlaySound: one global "system sound" channel; a new sound cuts the old one.
 //  - TMediaPlayer (MCI): independent channels (WAV/MIDI) with end notification.
 
+import { decodeAdpcmWav } from './adpcm.ts';
+
 export const SND_SYNC = 0;
 export const SND_ASYNC = 1;
 export const SND_NODEFAULT = 2;
@@ -28,6 +30,13 @@ class AudioSystem {
   }
 
   decode(buf: ArrayBuffer): Promise<AudioBuffer> {
+    // ADPCM WAVs (most of the Noorderlicht CD) are not understood by decodeAudioData
+    const pcm = decodeAdpcmWav(buf);
+    if (pcm) {
+      const ab = this.ctx.createBuffer(pcm.channels, pcm.data[0].length, pcm.rate);
+      pcm.data.forEach((d, i) => ab.copyToChannel(d as Float32Array<ArrayBuffer>, i));
+      return Promise.resolve(ab);
+    }
     return this.ctx.decodeAudioData(buf);
   }
 

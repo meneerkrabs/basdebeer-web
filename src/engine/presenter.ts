@@ -12,25 +12,48 @@ in vec2 pos;
 out vec2 uv;
 void main() { uv = pos * 0.5 + 0.5; gl_Position = vec4(pos, 0.0, 1.0); }`;
 
-// Pass 1 (640x480 -> 640x480): bilateral filter. Dither noise = small colour differences
-// between close pixels (averaged away); real edges = large differences (kept).
+// Pass 1a: a light 3x3 blur, used only as the *guide* for pass 1b.
+const FS_GUIDE = `#version 300 es
+precision highp float;
+uniform sampler2D src;
+out vec4 o;
+void main() {
+  ivec2 size = textureSize(src, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec3 sum = vec3(0.0);
+  float wsum = 0.0;
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      float w = exp(-float(dx * dx + dy * dy) / 2.0);
+      sum += texelFetch(src, clamp(p + ivec2(dx, dy), ivec2(0), size - 1), 0).rgb * w;
+      wsum += w;
+    }
+  }
+  o = vec4(sum / wsum, 1.0);
+}`;
+
+// Pass 1b: joint ("cross") bilateral filter. The original pixels are averaged, but whether
+// two pixels belong together is judged on the blurred guide: in the blurred image 256-colour
+// dither (even stray magenta or purple dots used to fake a pink sky) is flat and gets
+// averaged into the intended tint, while real edges stay large and are kept sharp.
 const FS_DEDITHER = `#version 300 es
 precision highp float;
 uniform sampler2D src;
+uniform sampler2D guide;
 uniform float rangeSigma;
 out vec4 o;
 void main() {
   ivec2 size = textureSize(src, 0);
   ivec2 p = ivec2(gl_FragCoord.xy);
-  vec3 c = texelFetch(src, p, 0).rgb;
+  vec3 g = texelFetch(guide, p, 0).rgb;
   vec3 sum = vec3(0.0);
   float wsum = 0.0;
   for (int dy = -2; dy <= 2; dy++) {
     for (int dx = -2; dx <= 2; dx++) {
-      vec3 n = texelFetch(src, clamp(p + ivec2(dx, dy), ivec2(0), size - 1), 0).rgb;
-      vec3 d = n - c;
+      ivec2 q = clamp(p + ivec2(dx, dy), ivec2(0), size - 1);
+      vec3 d = texelFetch(guide, q, 0).rgb - g;
       float w = exp(-float(dx * dx + dy * dy) / 3.0 - dot(d, d) / (2.0 * rangeSigma * rangeSigma));
-      sum += n * w;
+      sum += texelFetch(src, q, 0).rgb * w;
       wsum += w;
     }
   }
@@ -98,6 +121,9 @@ class GlPresenter implements Presenter {
   private srcTex: WebGLTexture;
   private fboTex: WebGLTexture;
   private fbo: WebGLFramebuffer;
+  private guideTex: WebGLTexture;
+  private guideFbo: WebGLFramebuffer;
+  private progGuide: WebGLProgram;
   private progDedither: WebGLProgram;
   private progScale: WebGLProgram;
   private texW = 0;
@@ -107,12 +133,13 @@ class GlPresenter implements Presenter {
     this.canvas = canvas;
     this.gl = gl;
     this.mode = mode;
+    this.progGuide = this.program(VS, FS_GUIDE);
     this.progDedither = this.program(VS, FS_DEDITHER);
     this.progScale = this.program(VS, FS_SCALE);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    for (const p of [this.progDedither, this.progScale]) {
+    for (const p of [this.progGuide, this.progDedither, this.progScale]) {
       const loc = gl.getAttribLocation(p, 'pos');
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
@@ -120,6 +147,8 @@ class GlPresenter implements Presenter {
     this.srcTex = gl.createTexture()!;
     this.fboTex = gl.createTexture()!;
     this.fbo = gl.createFramebuffer()!;
+    this.guideTex = gl.createTexture()!;
+    this.guideFbo = gl.createFramebuffer()!;
   }
 
   private program(vs: string, fs: string): WebGLProgram {
@@ -145,7 +174,7 @@ class GlPresenter implements Presenter {
 
   private setupTextures(w: number, h: number) {
     const gl = this.gl;
-    for (const t of [this.srcTex, this.fboTex]) {
+    for (const t of [this.srcTex, this.fboTex, this.guideTex]) {
       gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -153,6 +182,8 @@ class GlPresenter implements Presenter {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.fboTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.guideFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.guideTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.texW = w;
     this.texH = h;
@@ -166,15 +197,28 @@ class GlPresenter implements Presenter {
     let scaleSrc = this.srcTex;
     if (this.mode === 'smooth') {
       gl.viewport(0, 0, w, h);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      const nearest = (t: WebGLTexture, unit: number) => {
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      };
+      // 1a: guide = blurred source
+      nearest(this.srcTex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.guideFbo);
+      gl.useProgram(this.progGuide);
+      gl.uniform1i(gl.getUniformLocation(this.progGuide, 'src'), 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      // 1b: joint bilateral of the source, guided by 1a
+      nearest(this.guideTex, 1);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
       gl.useProgram(this.progDedither);
-      gl.uniform1f(gl.getUniformLocation(this.progDedither, 'rangeSigma'), 0.2);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.uniform1i(gl.getUniformLocation(this.progDedither, 'src'), 0);
+      gl.uniform1i(gl.getUniformLocation(this.progDedither, 'guide'), 1);
+      gl.uniform1f(gl.getUniformLocation(this.progDedither, 'rangeSigma'), 0.1);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE0);
       scaleSrc = this.fboTex;
     }
     // pass 1 renders with gl_FragCoord (y up) from a top-down texture, so the FBO is top-down too
