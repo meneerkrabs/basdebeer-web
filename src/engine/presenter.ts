@@ -60,17 +60,62 @@ void main() {
   o = vec4(sum / wsum, 1.0);
 }`;
 
+// Pass 1c: contrast-adaptive sharpening (after AMD CAS) at source resolution: restores
+// the crispness the de-dither smoothed away, limited by the local min/max so no halos.
+const FS_CAS = `#version 300 es
+precision highp float;
+uniform sampler2D src;
+uniform float sharpness;
+out vec4 o;
+vec3 at(ivec2 p, ivec2 size) { return texelFetch(src, clamp(p, ivec2(0), size - 1), 0).rgb; }
+void main() {
+  ivec2 size = textureSize(src, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec3 e = at(p, size);
+  vec3 b = at(p + ivec2(0, -1), size), d = at(p + ivec2(-1, 0), size), f = at(p + ivec2(1, 0), size), h = at(p + ivec2(0, 1), size);
+  vec3 mn = min(e, min(min(b, d), min(f, h)));
+  vec3 mx = max(e, max(max(b, d), max(f, h)));
+  vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-4), 0.0, 1.0));
+  vec3 w = amp * (-1.0 / mix(8.0, 5.0, sharpness));
+  o = vec4(clamp((e + w * (b + d + f + h)) / (1.0 + 4.0 * w), 0.0, 1.0), 1.0);
+}`;
+
 // Pass 2: scale to the canvas. Texture row 0 is the top of the image, so flip y.
+// Smooth mode upscales with a Catmull-Rom bicubic (sharper than bilinear), clamped to the
+// 2x2 neighbourhood so it can't ring; original mode samples the nearest pixel.
 // The art was made on CRTs (gamma ~2.5): on today's sRGB screens (2.2) it looks pale.
 // `crt` darkens the midtones to match and adds a little saturation (0 = untouched).
 const FS_SCALE = `#version 300 es
 precision highp float;
 uniform sampler2D src;
 uniform float crt;
+uniform int bicubic;
 in vec2 uv;
 out vec4 o;
+vec3 tx(ivec2 p) { ivec2 s = textureSize(src, 0); return texelFetch(src, clamp(p, ivec2(0), s - 1), 0).rgb; }
+vec4 cr(float t) {
+  float t2 = t * t, t3 = t2 * t;
+  return vec4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
 void main() {
-  vec3 c = texture(src, vec2(uv.x, 1.0 - uv.y)).rgb;
+  vec2 st = vec2(uv.x, 1.0 - uv.y);
+  vec3 c;
+  if (bicubic == 1) {
+    vec2 size = vec2(textureSize(src, 0));
+    vec2 pos = st * size - 0.5;
+    vec2 f = fract(pos);
+    ivec2 base = ivec2(floor(pos));
+    vec4 wx = cr(f.x), wy = cr(f.y);
+    c = vec3(0.0);
+    for (int j = 0; j < 4; j++) {
+      vec3 row = wx.x * tx(base + ivec2(-1, j - 1)) + wx.y * tx(base + ivec2(0, j - 1)) + wx.z * tx(base + ivec2(1, j - 1)) + wx.w * tx(base + ivec2(2, j - 1));
+      c += wy[j] * row;
+    }
+    vec3 a = tx(base), b = tx(base + ivec2(1, 0)), d = tx(base + ivec2(0, 1)), e = tx(base + ivec2(1, 1));
+    c = clamp(c, min(min(a, b), min(d, e)), max(max(a, b), max(d, e)));
+  } else {
+    c = texture(src, st).rgb;
+  }
   c = pow(c, vec3(1.0 + 0.14 * crt));
   float l = dot(c, vec3(0.299, 0.587, 0.114));
   c = clamp(mix(vec3(l), c, 1.0 + 0.18 * crt), 0.0, 1.0);
@@ -80,6 +125,10 @@ void main() {
 /** Strength of the CRT colour correction in smooth mode (0..1); ?crt=0.5 overrides for testing. */
 export const Presenter = {
   crt: Number(new URLSearchParams(globalThis.location?.search ?? '').get('crt') ?? 1),
+  /** CAS sharpening 0..1 in smooth mode (?sharp= to try other values; 0 = off). */
+  sharp: Number(new URLSearchParams(globalThis.location?.search ?? '').get('sharp') ?? 0.6),
+  /** Bicubic upscaling in smooth mode (?bicubic=0 for bilinear). */
+  bicubic: new URLSearchParams(globalThis.location?.search ?? '').get('bicubic') !== '0',
 };
 
 export interface Presenter {
@@ -123,7 +172,10 @@ class GlPresenter implements Presenter {
   private fbo: WebGLFramebuffer;
   private guideTex: WebGLTexture;
   private guideFbo: WebGLFramebuffer;
+  private casTex: WebGLTexture;
+  private casFbo: WebGLFramebuffer;
   private progGuide: WebGLProgram;
+  private progCas: WebGLProgram;
   private progDedither: WebGLProgram;
   private progScale: WebGLProgram;
   private texW = 0;
@@ -134,12 +186,13 @@ class GlPresenter implements Presenter {
     this.gl = gl;
     this.mode = mode;
     this.progGuide = this.program(VS, FS_GUIDE);
+    this.progCas = this.program(VS, FS_CAS);
     this.progDedither = this.program(VS, FS_DEDITHER);
     this.progScale = this.program(VS, FS_SCALE);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-    for (const p of [this.progGuide, this.progDedither, this.progScale]) {
+    for (const p of [this.progGuide, this.progDedither, this.progCas, this.progScale]) {
       const loc = gl.getAttribLocation(p, 'pos');
       gl.enableVertexAttribArray(loc);
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
@@ -149,6 +202,8 @@ class GlPresenter implements Presenter {
     this.fbo = gl.createFramebuffer()!;
     this.guideTex = gl.createTexture()!;
     this.guideFbo = gl.createFramebuffer()!;
+    this.casTex = gl.createTexture()!;
+    this.casFbo = gl.createFramebuffer()!;
   }
 
   private program(vs: string, fs: string): WebGLProgram {
@@ -174,7 +229,7 @@ class GlPresenter implements Presenter {
 
   private setupTextures(w: number, h: number) {
     const gl = this.gl;
-    for (const t of [this.srcTex, this.fboTex, this.guideTex]) {
+    for (const t of [this.srcTex, this.fboTex, this.guideTex, this.casTex]) {
       gl.bindTexture(gl.TEXTURE_2D, t);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -184,6 +239,8 @@ class GlPresenter implements Presenter {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.fboTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.guideFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.guideTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.casFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.casTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.texW = w;
     this.texH = h;
@@ -217,9 +274,19 @@ class GlPresenter implements Presenter {
       gl.uniform1i(gl.getUniformLocation(this.progDedither, 'guide'), 1);
       gl.uniform1f(gl.getUniformLocation(this.progDedither, 'rangeSigma'), 0.1);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      scaleSrc = this.fboTex;
+      // 1c: sharpening
+      if (Presenter.sharp > 0) {
+        nearest(this.fboTex, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.casFbo);
+        gl.useProgram(this.progCas);
+        gl.uniform1i(gl.getUniformLocation(this.progCas, 'src'), 0);
+        gl.uniform1f(gl.getUniformLocation(this.progCas, 'sharpness'), Presenter.sharp);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        scaleSrc = this.casTex;
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.activeTexture(gl.TEXTURE0);
-      scaleSrc = this.fboTex;
     }
     // pass 1 renders with gl_FragCoord (y up) from a top-down texture, so the FBO is top-down too
     gl.bindTexture(gl.TEXTURE_2D, scaleSrc);
@@ -229,6 +296,7 @@ class GlPresenter implements Presenter {
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.progScale);
     gl.uniform1f(gl.getUniformLocation(this.progScale, 'crt'), this.mode === 'smooth' ? Presenter.crt : 0);
+    gl.uniform1i(gl.getUniformLocation(this.progScale, 'bicubic'), this.mode === 'smooth' && Presenter.bicubic ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }
