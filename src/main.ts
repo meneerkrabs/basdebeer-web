@@ -115,6 +115,9 @@ async function play(book: Book, assets: Assets) {
   if (book === 'paaseiland' && !params.has('spellen')) {
     const { runPaaseiland } = await import('./books/paaseiland/book.ts');
     await runPaaseiland(display, assets);
+  } else if (book === 'noorderlicht' && !params.has('spellen')) {
+    const { runNoorderlicht } = await import('./books/noorderlicht/book.ts');
+    await runNoorderlicht(display, assets);
   } else if (book === 'pirateneiland' && !params.has('spellen')) {
     // the CD menu (Autorun.exe) leads to the book, BerenSpellen and BerenBios
     const { runPirateneilandMenu } = await import('./books/pirateneiland/launcher.ts');

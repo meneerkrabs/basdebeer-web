@@ -373,8 +373,8 @@ export class Display {
       const [x, y] = pos(e);
       this.mouseX = x; this.mouseY = y;
       const f = this.captured ?? this.target(x, y);
-      this.canvas.style.cursor = f?.cursor ?? 'default';
       f?.onMouseMove?.(shift(e), x - (f?.left ?? 0), y - (f?.top ?? 0));
+      this.canvas.style.cursor = f?.cursor ?? 'default';
     });
     this.canvas.addEventListener('pointerup', (e) => {
       const [x, y] = pos(e);
