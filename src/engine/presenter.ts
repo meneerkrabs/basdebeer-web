@@ -38,12 +38,26 @@ void main() {
 }`;
 
 // Pass 2: scale to the canvas. Texture row 0 is the top of the image, so flip y.
+// The art was made on CRTs (gamma ~2.5): on today's sRGB screens (2.2) it looks pale.
+// `crt` darkens the midtones to match and adds a little saturation (0 = untouched).
 const FS_SCALE = `#version 300 es
 precision highp float;
 uniform sampler2D src;
+uniform float crt;
 in vec2 uv;
 out vec4 o;
-void main() { o = vec4(texture(src, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0); }`;
+void main() {
+  vec3 c = texture(src, vec2(uv.x, 1.0 - uv.y)).rgb;
+  c = pow(c, vec3(1.0 + 0.14 * crt));
+  float l = dot(c, vec3(0.299, 0.587, 0.114));
+  c = clamp(mix(vec3(l), c, 1.0 + 0.18 * crt), 0.0, 1.0);
+  o = vec4(c, 1.0);
+}`;
+
+/** Strength of the CRT colour correction in smooth mode (0..1); ?crt=0.5 overrides for testing. */
+export const Presenter = {
+  crt: Number(new URLSearchParams(globalThis.location?.search ?? '').get('crt') ?? 1),
+};
 
 export interface Presenter {
   mode: DisplayMode;
@@ -170,6 +184,7 @@ class GlPresenter implements Presenter {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.progScale);
+    gl.uniform1f(gl.getUniformLocation(this.progScale, 'crt'), this.mode === 'smooth' ? Presenter.crt : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

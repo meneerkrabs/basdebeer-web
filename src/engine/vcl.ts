@@ -220,6 +220,8 @@ export class Display {
     this.canvas.width = this.width;
     this.canvas.height = this.height;
     this.canvas.className = 'bdb-screen';
+    this.canvas.dataset.logicalWidth = String(width);
+    this.canvas.dataset.logicalHeight = String(height);
     root.appendChild(this.canvas);
     this.video = document.createElement('video');
     this.video.className = 'bdb-video';
