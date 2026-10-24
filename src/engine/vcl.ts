@@ -272,6 +272,7 @@ export class Display {
     this.scale = scale;
     this.positionVideo();
     this.positionControls();
+    this.positionSkip();
   }
   private scale = 1;
   private videoRect: [number, number, number, number] | null = null;
@@ -313,7 +314,62 @@ export class Display {
     this.forms = [...this.forms.filter((x) => x !== f), f];
   }
 
+  /** Polled every frame by the skip button: what "Sla over" would do right now (null = hide). */
+  skipProvider: (() => { label: string; action: () => void } | null) | null = null;
+  private skipEl: HTMLButtonElement | null = null;
+  private skipAction: (() => void) | null = null;
+
+  private updateSkip() {
+    const s = this.skipProvider?.() ?? null;
+    if (!s) {
+      this.skipEl?.remove();
+      this.skipAction = null;
+      return;
+    }
+    if (!this.skipEl) {
+      const b = document.createElement('button');
+      b.className = 'bdb-skip';
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.skipAction?.();
+      });
+      this.skipEl = b;
+    }
+    if (this.skipEl.textContent !== s.label) {
+      this.skipEl.textContent = s.label;
+      if (this.skipEl.isConnected) this.positionSkip();
+    }
+    this.skipAction = s.action;
+    if (!this.skipEl.isConnected) {
+      this.root.appendChild(this.skipEl);
+      this.positionSkip();
+    }
+  }
+
+  /** Put the skip button beside the picture when there is room, else small at the bottom centre. */
+  private positionSkip() {
+    const b = this.skipEl;
+    if (!b) return;
+    const r = this.canvas.getBoundingClientRect(), pr = this.root.getBoundingClientRect();
+    const side = r.left - pr.left, below = pr.bottom - r.bottom;
+    const bw = b.offsetWidth || 170, bh = b.offsetHeight || 40;
+    b.classList.toggle('bdb-skip-overlay', false);
+    if (side >= bw + 24) Object.assign(b.style, { left: `${r.right - pr.left + 12}px`, top: `${r.top - pr.top + 12}px`, transform: '' });
+    else if (below >= bh + 12) Object.assign(b.style, { left: `${r.left - pr.left + r.width / 2}px`, top: `${r.bottom - pr.top + 6}px`, transform: 'translateX(-50%)' });
+    else {
+      b.classList.toggle('bdb-skip-overlay', true);
+      Object.assign(b.style, { left: `${r.left - pr.left + r.width / 2}px`, top: `${r.bottom - pr.top - bh - 6}px`, transform: 'translateX(-50%)' });
+    }
+  }
+
+  /** Close the topmost modal form (e.g. a skipped minigame) with a result code. */
+  closeTopModal(code: number) {
+    this.modal.at(-1)?.close(code);
+  }
+
   private present() {
+    this.updateSkip();
     for (const f of this.forms) if (f.visible && f.needsPaint) f.repaint();
     this.screen.px.fill(0);
     this.screen.textRuns = [];

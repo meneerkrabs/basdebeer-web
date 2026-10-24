@@ -4,6 +4,7 @@
 
 import { audio } from './audio.ts';
 import { rgb, Surface } from './surface.ts';
+import { onSkip } from './skip.ts';
 
 interface Chunk { off: number; size: number }
 
@@ -209,7 +210,9 @@ export function playAvi(avi: Avi, target: Surface, x: number, y: number): { stop
     }
     requestAnimationFrame(step);
   };
+  const unregister = onSkip(() => state.stop());
   state.stop = () => {
+    unregister();
     state.playing = false;
     try { src?.stop(); } catch { /* not started */ }
   };

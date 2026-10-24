@@ -9,7 +9,8 @@ import { audio, MediaPlayer, SND_ASYNC, SND_LOOP } from '../../engine/audio.ts';
 import type { Assets } from '../../engine/assets.ts';
 import { Avi, playAvi } from '../../engine/avi.ts';
 import { SRCAND, SRCPAINT, Surface, type FontSpec } from '../../engine/surface.ts';
-import { Form, type Display, type Timer } from '../../engine/vcl.ts';
+import { skipMedia, somethingToSkip } from '../../engine/skip.ts';
+import { Form, sleep, type Display, type Timer } from '../../engine/vcl.ts';
 import { paaseilandGames } from '../../games/paaseiland/index.ts';
 import type { MinigameSession } from '../../games/types.ts';
 import { runCredits } from './credits.ts';
@@ -97,6 +98,13 @@ class PaaseilandBook {
   private hover = -1;
   private mainImage: Surface | null = null;
   loadedScene = -1;
+  private loading = false;
+  private closing = false;
+  private ff = false;
+  private gameSkipped = false;
+  private gameStart = 0;
+  private gameIntroHeard = false;
+  private gameIntroDone = false;
 
   // animation slots: 1..3 are the bee (BijUit, BijIn, Bij)
   private anims: (Anim | null)[] = [null];
@@ -176,6 +184,7 @@ class PaaseilandBook {
     f.onPaint = null; // the front buffer *is* the form surface
     f.show();
     this.timer = f.timer(10, () => this.tick());
+    this.display.skipProvider = () => this.skipInfo();
   }
 
   // ---------------------------------------------------------------- timer (3.3, 8)
@@ -185,6 +194,7 @@ class PaaseilandBook {
   }
 
   private async tick() {
+    if (this.ff) return; // "Sla over" is fast-forwarding the script
     switch (this.state) {
       case S.Boot:
         this.state = S.Busy;
@@ -294,7 +304,9 @@ class PaaseilandBook {
     this.script.forEach((line, i) => {
       if (line.startsWith('{LABEL}')) this.labels.push({ name: line.slice(7, line.length - 1).slice(0, 20), line: i });
     });
+    this.loading = true;
     await this.display.whileLoading(this.preload());
+    this.loading = false;
     this.loadedScene = n; // (for tests)
     this.lineIdx = 0;
     this.nextClicks = 0;
@@ -347,6 +359,8 @@ class PaaseilandBook {
 
   private async close() {
     this.state = S.Busy;
+    this.closing = true;
+    this.display.skipProvider = null;
     this.timer.enabled = false;
     audio.sndPlaySound(null);
     this.reader.stop();
@@ -927,6 +941,81 @@ class PaaseilandBook {
     this.setInterval(this.state === S.Bee ? 50 : this.state === S.Reader ? 100 : this.state === S.Anim ? this.animSlot?.delay ?? 10 : 10);
   }
 
+  // ---------------------------------------------------------------- "Sla over" (not in the original)
+
+  /** What the skip button offers right now. */
+  private skipInfo(): { label: string; action: () => void } | null {
+    const st = this.state;
+    if (this.closing || this.loading || this.currentScene === 31) return null;
+    if (st === S.SignUp || st === S.SignDown || st === S.SignWait || st === S.Boot || st === S.NextScene || st === S.Leave) return null;
+    if (st === S.Movie) return { label: 'Film overslaan ⏭', action: () => skipMedia() };
+    if (st === S.Game) {
+      // the spoken instructions start shortly after the game opens; once they are over (or
+      // skipped) the button offers to skip the game itself
+      if (!this.gameIntroDone) {
+        const playing = somethingToSkip();
+        if (playing) this.gameIntroHeard = true;
+        else if (this.gameIntroHeard || performance.now() - this.gameStart > 4000) this.gameIntroDone = true;
+        if (!this.gameIntroDone) return { label: 'Uitleg overslaan ⏭', action: () => { skipMedia(); this.gameIntroDone = true; } };
+      }
+      return { label: 'Spel overslaan ⏭', action: () => this.skipGame() };
+    }
+    if (st === S.Idle || st === S.Bee) return { label: 'Volgende pagina ⏭', action: () => this.skipPage() };
+    return { label: 'Sla over ⏭', action: () => void this.fastForward() };
+  }
+
+  /** Run the page's script instantly up to the point where it waits for the player. */
+  private async fastForward() {
+    if (this.ff) return;
+    this.ff = true;
+    try {
+      skipMedia();
+      for (let i = 0; i < 5000; i++) {
+        const st = this.state;
+        if (st === S.Anim) {
+          this.animCur = this.animTo;
+          this.animPlaySound = false;
+          this.drawAnimFrame(); // show the last frame
+          if (this.mode === S.Bee) this.setInterval(50);
+          this.state = this.mode;
+        } else if (st === S.Delay || st === S.EffectWait) this.state = this.mode;
+        else if (st === S.Reader) {
+          this.reader.stop();
+          this.readerTick();
+        } else if (st === S.Run) await this.execLine();
+        else if (st === S.Busy) await sleep(10);
+        else break;
+        audio.stopSystemSound(); // sounds started by the skipped lines
+      }
+    } finally {
+      this.ff = false;
+    }
+  }
+
+  /** Go to the next page now, even if not enough things were clicked yet. */
+  private skipPage() {
+    if (this.state === S.Bee) {
+      audio.sndPlaySound(null);
+      const prev = this.bee[this.beeCur - 1];
+      if (prev) this.front.bitBlt(prev.x, prev.y, 32, 28, this.back, prev.x, prev.y);
+    }
+    if (this.currentScene !== 0) {
+      this.nextClicks = 0;
+      this.canTurn = true;
+      if (this.displayMode === 0) this.drawMenuButtons(this.repeatAvail, this.backAvail, true);
+    }
+    this.mode = S.Idle;
+    this.state = S.Leave;
+  }
+
+  /** Leave the minigame as if it was solved. */
+  private skipGame() {
+    this.gameSkipped = true;
+    audio.skipSounds();
+    this.display.closeTopModal(1);
+    this.gameResult = 1;
+  }
+
   // ---------------------------------------------------------------- games and movies (7)
 
   private async playGame(n: string) {
@@ -941,7 +1030,10 @@ class PaaseilandBook {
     this.form.cursor = 'default';
     const session = mod.default({ display: this.display, assets: this.assets });
     this.game = session;
-    session.result.then((r) => (this.gameResult = r === 2 ? 2 : 1));
+    this.gameSkipped = false;
+    this.gameStart = performance.now();
+    this.gameIntroHeard = this.gameIntroDone = false;
+    session.result.then((r) => (this.gameResult = this.gameSkipped ? 1 : r === 2 ? 2 : 1));
     this.state = S.Game;
   }
 

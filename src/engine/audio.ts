@@ -14,7 +14,7 @@ export const SND_NOSTOP = 0x10;
 class AudioSystem {
   ctx: AudioContext;
   master: GainNode;
-  private current: { src: AudioBufferSourceNode; done: Promise<void>; finished: boolean } | null = null;
+  private current: { src: AudioBufferSourceNode; done: Promise<void>; finished: boolean; resolve: () => void } | null = null;
 
   constructor() {
     this.ctx = new AudioContext();
@@ -59,7 +59,8 @@ class AudioSystem {
     src.loop = !!(flags & SND_LOOP);
     src.connect(this.master);
     let resolve!: () => void;
-    const entry = { src, done: new Promise<void>((r) => (resolve = r)), finished: false };
+    const done = new Promise<void>((r) => (resolve = r));
+    const entry = { src, done, finished: false, resolve };
     src.onended = () => {
       entry.finished = true;
       resolve();
@@ -87,7 +88,14 @@ class AudioSystem {
       c.src.onended = null;
       c.finished = true;
       try { c.src.stop(); } catch { /* already stopped */ }
+      c.resolve(); // a synchronous sndPlaySound returns when its sound is stopped
     }
+  }
+
+  /** "Sla over": end the system sound and every MCI player as if they had finished. */
+  skipSounds() {
+    this.stopSystemSound();
+    for (const p of [...MediaPlayer.playing]) p.finishNow();
   }
 }
 
@@ -95,6 +103,8 @@ export const audio = new AudioSystem();
 
 /** Minimal TMediaPlayer for audio files (WAV, or MIDI pre-rendered to M4A). */
 export class MediaPlayer {
+  /** Players currently playing (for skipSounds). */
+  static playing = new Set<MediaPlayer>();
   private src: AudioBufferSourceNode | null = null;
   private buffer: AudioBuffer | null = null;
   private startedAt = 0;
@@ -117,18 +127,28 @@ export class MediaPlayer {
     src.onended = () => {
       if (this.src !== src) return;
       this.src = null;
+      MediaPlayer.playing.delete(this);
       this.onNotify?.();
     };
     this.src = src;
+    MediaPlayer.playing.add(this);
     const from = Math.max(0, startMs / 1000);
     this.startedAt = audio.ctx.currentTime - from;
     if (endMs !== undefined && endMs > startMs) src.start(0, from, (endMs - startMs) / 1000);
     else src.start(0, from);
   }
 
+  /** Stop and report the end, as if the file had played to its end ("Sla over"). */
+  finishNow() {
+    if (!this.src) return;
+    this.stop();
+    this.onNotify?.();
+  }
+
   stop() {
     const s = this.src;
     this.src = null;
+    MediaPlayer.playing.delete(this);
     if (s) {
       s.onended = null;
       try { s.stop(); } catch { /* ignore */ }
