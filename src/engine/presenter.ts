@@ -1,11 +1,12 @@
-// Puts the 640x480 framebuffer on screen. Two looks:
+// Puts the 640x480 framebuffer on screen. Three looks:
 //  - 'original': crisp pixels, nearest-neighbour scaling (what a 1996 monitor showed)
 //  - 'smooth':   removes the 256-colour dithering grain with an edge-preserving
 //                (bilateral) filter, then scales smoothly. Only the presentation changes;
 //                the games keep working on the original pixels.
+//  - 'ai':       'smooth' underneath, plus tiles upscaled by a neural network on top (ai.ts).
 // WebGL2 when available, otherwise a plain 2D canvas (original look only).
 
-export type DisplayMode = 'original' | 'smooth';
+export type DisplayMode = 'original' | 'smooth' | 'ai';
 
 const VS = `#version 300 es
 in vec2 pos;
@@ -252,7 +253,7 @@ class GlPresenter implements Presenter {
     gl.bindTexture(gl.TEXTURE_2D, this.srcTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(px.buffer, px.byteOffset, w * h * 4));
     let scaleSrc = this.srcTex;
-    if (this.mode === 'smooth') {
+    if (this.mode !== 'original') {
       gl.viewport(0, 0, w, h);
       const nearest = (t: WebGLTexture, unit: number) => {
         gl.activeTexture(gl.TEXTURE0 + unit);
@@ -290,13 +291,13 @@ class GlPresenter implements Presenter {
     }
     // pass 1 renders with gl_FragCoord (y up) from a top-down texture, so the FBO is top-down too
     gl.bindTexture(gl.TEXTURE_2D, scaleSrc);
-    const filter = this.mode === 'smooth' ? gl.LINEAR : gl.NEAREST;
+    const filter = this.mode !== 'original' ? gl.LINEAR : gl.NEAREST;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.useProgram(this.progScale);
-    gl.uniform1f(gl.getUniformLocation(this.progScale, 'crt'), this.mode === 'smooth' ? Presenter.crt : 0);
-    gl.uniform1i(gl.getUniformLocation(this.progScale, 'bicubic'), this.mode === 'smooth' && Presenter.bicubic ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(this.progScale, 'crt'), this.mode !== 'original' ? Presenter.crt : 0);
+    gl.uniform1i(gl.getUniformLocation(this.progScale, 'bicubic'), this.mode !== 'original' && Presenter.bicubic ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 }

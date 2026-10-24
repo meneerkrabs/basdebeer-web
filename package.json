@@ -21,6 +21,7 @@
   },
   "private": true,
   "dependencies": {
+    "onnxruntime-web": "^1.30.0",
     "spessasynth_lib": "^4.3.14"
   }
 }

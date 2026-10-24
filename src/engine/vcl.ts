@@ -3,7 +3,8 @@
 // routing, Delphi's Random(), and an overlay for AVI playback (TMediaPlayer + Display).
 
 import { cssColor, cssFont, Surface } from './surface.ts';
-import { createPresenter, type DisplayMode, type Presenter } from './presenter.ts';
+import { AiUpscaler, aiSupported } from './ai.ts';
+import { createPresenter, Presenter, type DisplayMode } from './presenter.ts';
 
 /** Default "monitor" size; Display can be created larger (Noorderlicht is 800x600). */
 export const SCREEN_W = 640;
@@ -230,7 +231,8 @@ export class Display {
     root.appendChild(this.video);
     if (import.meta.env.DEV) (globalThis as { __display?: Display }).__display = this;
     this.presenter = createPresenter(this.canvas, Display.savedMode());
-    Surface.smoothStipple = Surface.hiResText = this.presenter.mode === 'smooth';
+    Surface.smoothStipple = Surface.hiResText = this.presenter.mode !== 'original';
+    if (this.presenter.mode === 'ai') this.startAi();
     this.textLayer = document.createElement('canvas');
     this.textLayer.className = 'bdb-text';
     root.appendChild(this.textLayer);
@@ -244,6 +246,17 @@ export class Display {
     requestAnimationFrame(loop);
   }
 
+  private ai: AiUpscaler | null = null;
+  /** AI tiles go on their own canvas right above the WebGL one (below the video and the text layer). */
+  private startAi() {
+    this.ai = new AiUpscaler(this.width, this.height, Presenter.crt);
+    this.canvas.after(this.ai.canvas);
+  }
+  /** Time/throughput numbers of the AI layer (null unless the 'ai' look is active). */
+  get aiStats() {
+    return this.ai?.stats ?? null;
+  }
+
   private layout() {
     const r = this.root.getBoundingClientRect();
     const scale = Math.min(r.width / this.width, r.height / this.height);
@@ -255,6 +268,7 @@ export class Display {
     this.textLayer.height = Math.round(h * dpr);
     const cr = this.canvas.getBoundingClientRect(), pr = this.root.getBoundingClientRect();
     Object.assign(this.textLayer.style, { width: `${w}px`, height: `${h}px`, left: `${cr.left - pr.left}px`, top: `${cr.top - pr.top}px` });
+    this.ai?.place({ width: `${w}px`, height: `${h}px`, left: `${cr.left - pr.left}px`, top: `${cr.top - pr.top}px` });
     this.scale = scale;
     this.positionVideo();
     this.positionControls();
@@ -262,10 +276,11 @@ export class Display {
   private scale = 1;
   private videoRect: [number, number, number, number] | null = null;
 
-  /** 'smooth' (de-dithered, default) or 'original' (crisp 256-colour pixels); ?display=original overrides. */
+  /** 'smooth' (de-dithered, default), 'original' (crisp 256-colour pixels) or 'ai' (smooth + neural upscaling, needs WebGPU); ?display= overrides. */
   static savedMode(): DisplayMode {
     const q = new URLSearchParams(location.search).get('display');
     const v = q ?? localStorage.getItem('bdb-display');
+    if (v === 'ai' && aiSupported()) return 'ai';
     return v === 'original' ? 'original' : 'smooth';
   }
 
@@ -274,7 +289,9 @@ export class Display {
   }
   set mode(m: DisplayMode) {
     this.presenter.mode = m;
-    Surface.smoothStipple = Surface.hiResText = m === 'smooth';
+    Surface.smoothStipple = Surface.hiResText = m !== 'original';
+    if (m === 'ai' && !this.ai && aiSupported()) { this.startAi(); this.layout(); }
+    if (this.ai) this.ai.canvas.style.display = m === 'ai' ? '' : 'none';
     localStorage.setItem('bdb-display', m);
   }
 
@@ -306,6 +323,7 @@ export class Display {
     }
     this.overlay?.(this.screen);
     this.presenter.present(this.screen.px, this.width, this.height);
+    if (this.presenter.mode === 'ai' && this.root.isConnected) this.ai?.update(this.screen.px);
     this.drawText();
   }
 

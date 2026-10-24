@@ -2,6 +2,7 @@ import './style.css';
 import { audio } from './engine/audio.ts';
 import type { Assets, Book } from './engine/assets.ts';
 import { Display } from './engine/vcl.ts';
+import { aiSupported } from './engine/ai.ts';
 import { addIso, ARCHIVE_PAGE, availableBooks, BOOKS, cdFolder, removeIso } from './library.ts';
 import { paaseilandGames } from './games/paaseiland/index.ts';
 import { pirateneilandGames } from './games/pirateneiland/index.ts';
@@ -65,7 +66,8 @@ async function startScreen() {
 
   const look = el('select', { onchange: () => localStorage.setItem('bdb-display', look.value) },
     el('option', { value: 'smooth', textContent: 'Glad (korrel van 256 kleuren weggefilterd)' }),
-    el('option', { value: 'original', textContent: 'Origineel (scherpe pixels)' }));
+    el('option', { value: 'original', textContent: 'Origineel (scherpe pixels)' }),
+    el('option', { value: 'ai', textContent: aiSupported() ? 'AI-scherp (extra scherpte via AI, experimenteel)' : 'AI-scherp (vereist WebGPU)', disabled: !aiSupported() }));
   look.value = Display.savedMode();
 
   const screen = el('div', { className: 'bdb-start' },
