@@ -5,6 +5,8 @@ import type { Display } from '../engine/vcl.ts';
 export interface MinigameHost {
   display: Display;
   assets: Assets;
+  /** Book-specific launch parameters, e.g. Noorderlicht's { mode: 'N' | 'D' } (normal / 3D glasses). */
+  params?: Record<string, string | number>;
 }
 
 export interface MinigameSession {

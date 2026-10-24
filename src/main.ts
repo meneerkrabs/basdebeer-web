@@ -97,7 +97,8 @@ async function play(book: Book, assets: Assets) {
   app.replaceChildren();
   const host = el('div');
   app.appendChild(host);
-  const display = new Display(host);
+  // Noorderlicht was designed for 800x600, the other books for 640x480
+  const display = book === 'noorderlicht' ? new Display(host, 800, 600) : new Display(host);
   const params = new URLSearchParams(location.search);
   const registry = GAMES[book] ?? {};
   const game = params.get('game');

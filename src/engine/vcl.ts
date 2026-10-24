@@ -5,6 +5,7 @@
 import { Surface } from './surface.ts';
 import { createPresenter, type DisplayMode, type Presenter } from './presenter.ts';
 
+/** Default "monitor" size; Display can be created larger (Noorderlicht is 800x600). */
 export const SCREEN_W = 640;
 export const SCREEN_H = 480;
 
@@ -36,7 +37,7 @@ export class Form {
   readonly display: Display;
   readonly name: string;
 
-  constructor(display: Display, width = SCREEN_W, height = SCREEN_H, name = 'form') {
+  constructor(display: Display, width = display.width, height = display.height, name = 'form') {
     this.display = display;
     this.name = name;
     this.surface = new Surface(width, height);
@@ -56,8 +57,8 @@ export class Form {
 
   /** Centre on the 640x480 screen (Position = poScreenCenter). */
   center() {
-    this.left = Math.round((SCREEN_W - this.width) / 2);
-    this.top = Math.round((SCREEN_H - this.height) / 2);
+    this.left = Math.round((this.display.width - this.width) / 2);
+    this.top = Math.round((this.display.height - this.height) / 2);
   }
 
   invalidate() {
@@ -195,7 +196,9 @@ export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 export class Display {
   readonly canvas: HTMLCanvasElement;
   private presenter: Presenter;
-  readonly screen = new Surface(SCREEN_W, SCREEN_H);
+  readonly width: number;
+  readonly height: number;
+  readonly screen: Surface;
   private forms: Form[] = [];
   private modal: Form[] = [];
   private captured: Form | null = null;
@@ -207,12 +210,15 @@ export class Display {
 
   readonly root: HTMLElement;
 
-  constructor(root: HTMLElement) {
+  constructor(root: HTMLElement, width = SCREEN_W, height = SCREEN_H) {
     this.root = root;
+    this.width = width;
+    this.height = height;
+    this.screen = new Surface(width, height);
     root.classList.add('bdb-root');
     this.canvas = document.createElement('canvas');
-    this.canvas.width = SCREEN_W;
-    this.canvas.height = SCREEN_H;
+    this.canvas.width = this.width;
+    this.canvas.height = this.height;
     this.canvas.className = 'bdb-screen';
     root.appendChild(this.canvas);
     this.video = document.createElement('video');
@@ -234,8 +240,8 @@ export class Display {
 
   private layout() {
     const r = this.root.getBoundingClientRect();
-    const scale = Math.min(r.width / SCREEN_W, r.height / SCREEN_H);
-    const w = Math.floor(SCREEN_W * scale), h = Math.floor(SCREEN_H * scale);
+    const scale = Math.min(r.width / this.width, r.height / this.height);
+    const w = Math.floor(this.width * scale), h = Math.floor(this.height * scale);
     Object.assign(this.canvas.style, { width: `${w}px`, height: `${h}px` });
     this.presenter.resize(w, h);
     this.scale = scale;
@@ -286,7 +292,7 @@ export class Display {
       if (f.visible) this.screen.bitBlt(f.left, f.top, f.width, f.height, f.surface, 0, 0);
     }
     this.overlay?.(this.screen);
-    this.presenter.present(this.screen.px, SCREEN_W, SCREEN_H);
+    this.presenter.present(this.screen.px, this.width, this.height);
   }
 
   /** Topmost visible form under a screen point (respecting modal forms). */
@@ -304,7 +310,7 @@ export class Display {
   private bindInput() {
     const pos = (e: PointerEvent | MouseEvent) => {
       const r = this.canvas.getBoundingClientRect();
-      return [Math.floor(((e.clientX - r.left) / r.width) * SCREEN_W), Math.floor(((e.clientY - r.top) / r.height) * SCREEN_H)];
+      return [Math.floor(((e.clientX - r.left) / r.width) * this.width), Math.floor(((e.clientY - r.top) / r.height) * this.height)];
     };
     const shift = (e: PointerEvent | MouseEvent | KeyboardEvent): ShiftState => ({
       shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey,
