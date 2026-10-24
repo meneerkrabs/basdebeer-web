@@ -151,8 +151,10 @@ class GlPresenter implements Presenter {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(px.buffer, px.byteOffset, w * h * 4));
     let scaleSrc = this.srcTex;
     if (this.mode === 'smooth') {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
       gl.viewport(0, 0, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
       gl.useProgram(this.progDedither);
       gl.uniform1f(gl.getUniformLocation(this.progDedither, 'rangeSigma'), 0.2);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);

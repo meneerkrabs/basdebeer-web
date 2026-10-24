@@ -79,6 +79,12 @@ export class Assets {
     return new TextDecoder('utf-8').decode(await this.raw(k + '.TXT'));
   }
 
+  /** A cp1252 text file from the CD root (outside BASWIN). */
+  async rootText(name: string): Promise<string> {
+    if (!this.vfs.readRoot) throw new Error('no root access');
+    return new TextDecoder('windows-1252').decode(await this.vfs.readRoot(name));
+  }
+
   /** A plain cp1252 text/data file. */
   async text(name: string): Promise<string> {
     return new TextDecoder('windows-1252').decode(await this.raw(name));

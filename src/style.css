@@ -10,3 +10,6 @@ html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family
 .bdb-start button:disabled { opacity: 0.4; cursor: not-allowed; }
 .bdb-start .note { font-size: 0.85rem; opacity: 0.7; max-width: 40rem; text-align: center; }
 .bdb-error { position: absolute; inset: auto 1rem 1rem 1rem; padding: 1rem; background: #600; color: #fff; z-index: 20; white-space: pre-wrap; font-family: monospace; }
+.bdb-control { position: absolute; box-sizing: border-box; z-index: 5; }
+.bdb-help-memo { font-family: "MS Sans Serif", Tahoma, Arial, sans-serif; resize: none; background: #fff; color: #000; border: 2px inset #ccc; padding: 2px; }
+.bdb-help-ok { font-family: "MS Sans Serif", Tahoma, Arial, sans-serif; background: #c0c0c0; border: 2px outset #eee; color: #000; cursor: pointer; padding: 0; }

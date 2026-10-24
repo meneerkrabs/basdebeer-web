@@ -97,7 +97,8 @@ export class MediaPlayer {
     this.buffer = buffer;
   }
 
-  play() {
+  /** Play, optionally only StartPos..EndPos (ms), like MCI with TimeFormat = tfMilliseconds. */
+  play(startMs = 0, endMs?: number) {
     if (!this.buffer) return;
     this.stop();
     const src = audio.ctx.createBufferSource();
@@ -110,8 +111,10 @@ export class MediaPlayer {
       this.onNotify?.();
     };
     this.src = src;
-    this.startedAt = audio.ctx.currentTime;
-    src.start();
+    const from = Math.max(0, startMs / 1000);
+    this.startedAt = audio.ctx.currentTime - from;
+    if (endMs !== undefined && endMs > startMs) src.start(0, from, (endMs - startMs) / 1000);
+    else src.start(0, from);
   }
 
   stop() {
@@ -132,9 +135,14 @@ export class MediaPlayer {
     return this.src !== null;
   }
 
-  /** Position in ms (MCI TimeFormat = tfMilliseconds). */
+  /** Position in ms from the start of the file (MCI TimeFormat = tfMilliseconds). */
   get position(): number {
     return this.src ? (audio.ctx.currentTime - this.startedAt) * 1000 : 0;
+  }
+
+  /** MCI Mode: playing until the range ends or stop() is called. */
+  get mode(): 'playing' | 'stopped' {
+    return this.src ? 'playing' : 'stopped';
   }
 
   get length(): number {

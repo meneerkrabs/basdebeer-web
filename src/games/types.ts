@@ -15,6 +15,8 @@ export interface MinigameSession {
   result: Promise<number>;
   /** The book's stop icon was clicked while the game runs (originals show a JA/NEE sign). */
   requestQuit?(): void;
+  /** The book's HERHALEN button during the game (originals replay the spoken instructions). */
+  repeat?(): void;
 }
 
 /** Creates the game's form(s), shows them and starts the game. */

@@ -95,7 +95,9 @@ async function startScreen() {
 
 async function play(book: Book, assets: Assets) {
   app.replaceChildren();
-  const display = new Display(app);
+  const host = el('div');
+  app.appendChild(host);
+  const display = new Display(host);
   const params = new URLSearchParams(location.search);
   const registry = GAMES[book] ?? {};
   const game = params.get('game');
@@ -108,9 +110,15 @@ async function play(book: Book, assets: Assets) {
     console.log(`minigame ${game} ended with code ${code}`);
     return;
   }
-  // The story engines are being ported; until then offer the minigames directly.
-  const { runGameMenu } = await import('./game-menu.ts');
-  await runGameMenu(display, assets, registry);
+  if (book === 'paaseiland' && !params.has('spellen')) {
+    const { runPaaseiland } = await import('./books/paaseiland/book.ts');
+    await runPaaseiland(display, assets);
+  } else {
+    // story engines still being ported (or ?spellen): offer the minigames directly
+    const { runGameMenu } = await import('./game-menu.ts');
+    await runGameMenu(display, assets, registry);
+  }
+  display.root.remove();
   startScreen();
 }
 

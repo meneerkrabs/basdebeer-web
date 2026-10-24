@@ -66,8 +66,10 @@ function run(maxSteps: number, log: string[]): string | null {
         g.selectCell(cell % 3, Math.floor(cell / 3));
       } else if (r < 93) {
         log.push(`t=${now} click Rongo`); g.mouseDown(480, 100);
-      } else if (r < 96) {
+      } else if (r < 95) {
         log.push(`t=${now} stop icon`); g.requestQuit();
+      } else if (r < 97) {
+        log.push(`t=${now} HERHALEN`); g.repeatInstructions();
       } else {
         const yes = rand(4) === 0;
         log.push(`t=${now} click ${yes ? 'JA' : 'NEE'}`);

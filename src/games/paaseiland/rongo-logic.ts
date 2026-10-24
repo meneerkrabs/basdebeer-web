@@ -239,6 +239,13 @@ export class RongoLogic {
     }
   }
 
+  /** @0x434e8c: the book's HERHALEN button during the game replays the instructions (only when idle). */
+  repeatInstructions() {
+    if (this.state !== St.Idle) return;
+    this.fx.playSound(0, SND_ASYNC | SND_MEMORY);
+    this.state = St.Instructions;
+  }
+
   /** @0x435058: the book's stop icon was clicked — raise the JA/NEE sign (only when idle). */
   requestQuit(): boolean {
     if (this.state !== St.Idle) return false;

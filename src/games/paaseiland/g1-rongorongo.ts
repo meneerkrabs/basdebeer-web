@@ -39,6 +39,7 @@ const rongoRongo: Minigame = ({ display, assets }) => {
       close: () => form.close(g.exitCode || 2),
     });
     logic = g;
+    if (import.meta.env.DEV) (globalThis as { __rongo?: unknown }).__rongo = g;
 
     form.onPaint = () => {
       const s = form.surface;
@@ -88,7 +89,7 @@ const rongoRongo: Minigame = ({ display, assets }) => {
   });
 
   form.showModal().then(() => resolveResult(logic?.exitCode || 2));
-  return { result, requestQuit: () => logic?.requestQuit() };
+  return { result, requestQuit: () => logic?.requestQuit(), repeat: () => logic?.repeatInstructions() };
 };
 
 export default rongoRongo;

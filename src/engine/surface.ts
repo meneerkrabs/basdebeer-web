@@ -65,7 +65,18 @@ function textCtx(): OffscreenCanvasRenderingContext2D {
   return measureCtx;
 }
 
+/** Per-pixel weight of a stippled SRCAND mask (see Surface.smoothStipple); NaN = not stipple. */
+interface PendingStipple { surface: Surface; dx: number; dy: number; w: number; h: number; white: Float32Array }
+let pendingStipple: PendingStipple | null = null;
+
 export class Surface {
+  /**
+   * 'Smooth' display mode: 1990s sprites faked translucent shadows with a stippled mask
+   * (SRCAND mask, then SRCPAINT sprite). When set, stippled mask areas are drawn as a real
+   * blend with the matching SRCPAINT instead, which reads as a soft shadow.
+   */
+  static smoothStipple = false;
+
   readonly width: number;
   readonly height: number;
   readonly px: Uint32Array;
@@ -129,6 +140,11 @@ export class Surface {
       if (sy + h > src.height) h = src.height - sy;
     }
     if (w <= 0 || h <= 0) return;
+    if (Surface.smoothStipple && src) {
+      if (rop === SRCAND && this.stippleAnd(dx, dy, w, h, src, sx, sy)) return;
+      if (rop === SRCPAINT && this.stipplePaint(dx, dy, w, h, src, sx, sy)) return;
+    }
+    if (pendingStipple?.surface === this) pendingStipple = null;
     const d = this.px, W = this.width;
     const s = src?.px, SW = src?.width ?? 0;
     for (let y = 0; y < h; y++) {
@@ -150,6 +166,96 @@ export class Surface {
         default: throw new Error(`unsupported ROP 0x${rop.toString(16)}`);
       }
     }
+  }
+
+  /** SRCAND with a black/white mask containing stipple: blend instead. Returns false if not applicable. */
+  private stippleAnd(dx: number, dy: number, w: number, h: number, mask: Surface, sx: number, sy: number): boolean {
+    const M = mask.px, MW = mask.width, MH = mask.height;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0, i = (sy + y) * MW + sx; x < w; x++, i++) if (M[i] !== 0 && M[i] !== 0xffffff) return false;
+    }
+    const white = new Float32Array(w * h).fill(NaN);
+    const at = (x: number, y: number) => {
+      const xx = Math.min(MW - 1, Math.max(0, x)), yy = Math.min(MH - 1, Math.max(0, y));
+      return M[yy * MW + xx] ? 1 : 0;
+    };
+    // per pixel: 3x3 white fraction and number of black/white transitions in the window
+    // (a straight edge gives ~3, a checkerboard 12)
+    const frac = new Float32Array(w * h), core = new Uint8Array(w * h);
+    let any = false;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const mx = sx + x, my = sy + y;
+        let trans = 0, sum = 0;
+        for (let j = -1; j <= 1; j++) {
+          for (let i = -1; i <= 1; i++) {
+            const v = at(mx + i, my + j);
+            sum += v;
+            if (i < 1 && v !== at(mx + i + 1, my + j)) trans++;
+            if (j < 1 && v !== at(mx + i, my + j + 1)) trans++;
+          }
+        }
+        frac[y * w + x] = sum / 9;
+        if (trans >= 6) { core[y * w + x] = 1; any = true; }
+      }
+    }
+    if (!any) return false;
+    // grow the stipple area by one pixel into mixed (not solid) neighbourhoods
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const f = frac[y * w + x];
+        if (f <= 0 || f >= 1) continue;
+        let near = false;
+        for (let j = -1; j <= 1 && !near; j++) for (let i = -1; i <= 1; i++) {
+          const xx = x + i, yy = y + j;
+          if (xx >= 0 && yy >= 0 && xx < w && yy < h && core[yy * w + xx]) { near = true; break; }
+        }
+        if (near) white[y * w + x] = f;
+      }
+    }
+    const D = this.px, W = this.width;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const di = (dy + y) * W + dx + x, m = white[y * w + x];
+        if (Number.isNaN(m)) D[di] &= M[(sy + y) * MW + sx + x];
+        else {
+          const c = D[di];
+          D[di] = rgb((c & 255) * m, ((c >> 8) & 255) * m, ((c >> 16) & 255) * m);
+        }
+      }
+    }
+    pendingStipple = { surface: this, dx, dy, w, h, white };
+    return true;
+  }
+
+  /** SRCPAINT that completes a stippled SRCAND at the same rect: add the averaged sprite colour. */
+  private stipplePaint(dx: number, dy: number, w: number, h: number, sprite: Surface, sx: number, sy: number): boolean {
+    const p = pendingStipple;
+    if (!p || p.surface !== this || p.dx !== dx || p.dy !== dy || p.w !== w || p.h !== h) return false;
+    pendingStipple = null;
+    const S = sprite.px, SW = sprite.width, SH = sprite.height, D = this.px, W = this.width;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const di = (dy + y) * W + dx + x, m = p.white[y * w + x];
+        const si = (sy + y) * SW + sx + x;
+        if (Number.isNaN(m)) { D[di] |= S[si]; continue; }
+        // average of the sprite's coloured (non-black) pixels around: the stipple's "ink"
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let j = -1; j <= 1; j++) {
+          for (let i = -1; i <= 1; i++) {
+            const xx = sx + x + i, yy = sy + y + j;
+            if (xx < 0 || yy < 0 || xx >= SW || yy >= SH) continue;
+            const c = S[yy * SW + xx];
+            if (c === 0) continue;
+            r += c & 255; g += (c >> 8) & 255; b += (c >> 16) & 255; n++;
+          }
+        }
+        if (!n) continue;
+        const k = (1 - m) / n, c = D[di];
+        D[di] = rgb(Math.min(255, (c & 255) + r * k), Math.min(255, ((c >> 8) & 255) + g * k), Math.min(255, ((c >> 16) & 255) + b * k));
+      }
+    }
+    return true;
   }
 
   /** Copy with a transparent colour key (TBitmap.Transparent / TransparentBlt). */

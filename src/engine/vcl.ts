@@ -21,6 +21,8 @@ export class Form {
   /** CSS cursor while the pointer is over this form. */
   cursor = 'default';
   modalResult = mrNone;
+  /** Still receives clicks outside a modal form on top of it (the books stay usable under a game). */
+  inputBehindModal = false;
   onPaint: (() => void) | null = null;
   onMouseDown: ((button: MouseButton, shift: ShiftState, x: number, y: number) => void) | null = null;
   onMouseUp: ((button: MouseButton, shift: ShiftState, x: number, y: number) => void) | null = null;
@@ -219,6 +221,7 @@ export class Display {
     this.video.hidden = true;
     root.appendChild(this.video);
     this.presenter = createPresenter(this.canvas, Display.savedMode());
+    Surface.smoothStipple = this.presenter.mode === 'smooth';
     this.bindInput();
     this.layout();
     addEventListener('resize', () => this.layout());
@@ -237,6 +240,7 @@ export class Display {
     this.presenter.resize(w, h);
     this.scale = scale;
     this.positionVideo();
+    this.positionControls();
   }
   private scale = 1;
   private videoRect: [number, number, number, number] | null = null;
@@ -253,6 +257,7 @@ export class Display {
   }
   set mode(m: DisplayMode) {
     this.presenter.mode = m;
+    Surface.smoothStipple = m === 'smooth';
     localStorage.setItem('bdb-display', m);
   }
 
@@ -286,12 +291,14 @@ export class Display {
 
   /** Topmost visible form under a screen point (respecting modal forms). */
   private target(x: number, y: number): Form | null {
-    if (this.modal.length) return this.modal[this.modal.length - 1];
+    const inside = (f: Form) => f.visible && x >= f.left && y >= f.top && x < f.left + f.width && y < f.top + f.height;
+    const modal = this.modal.at(-1);
+    if (modal && inside(modal)) return modal;
     for (let i = this.forms.length - 1; i >= 0; i--) {
       const f = this.forms[i];
-      if (f.visible && x >= f.left && y >= f.top && x < f.left + f.width && y < f.top + f.height) return f;
+      if (inside(f)) return !modal || f.inputBehindModal ? f : modal;
     }
-    return null;
+    return modal ?? null;
   }
 
   private bindInput() {
@@ -361,6 +368,27 @@ export class Display {
       v.onclick = opts.skippable ? done : null;
       v.play().catch(done);
     });
+  }
+
+  private controls: { el: HTMLElement; rect: [number, number, number, number] }[] = [];
+
+  /** Overlay a native HTML control at a screen rect (scaled with the display); remove the element to detach. */
+  attachControl(el: HTMLElement, x: number, y: number, w: number, h: number) {
+    el.classList.add('bdb-control');
+    this.root.appendChild(el);
+    this.controls.push({ el, rect: [x, y, w, h] });
+    this.positionControls();
+  }
+
+  private positionControls() {
+    this.controls = this.controls.filter((c) => c.el.isConnected);
+    const r = this.canvas.getBoundingClientRect(), pr = this.root.getBoundingClientRect();
+    for (const { el, rect: [x, y, w, h] } of this.controls) {
+      Object.assign(el.style, {
+        left: `${r.left - pr.left + x * this.scale}px`, top: `${r.top - pr.top + y * this.scale}px`,
+        width: `${w * this.scale}px`, height: `${h * this.scale}px`, fontSize: `${11 * this.scale}px`,
+      });
+    }
   }
 
   private positionVideo() {

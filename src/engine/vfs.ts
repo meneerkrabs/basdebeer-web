@@ -6,6 +6,8 @@ export interface Vfs {
   /** All files, upper-case relative paths. */
   list(): string[];
   read(path: string): Promise<ArrayBuffer>;
+  /** A file outside BASWIN, in the CD root (e.g. HELPBOEK.TXT). */
+  readRoot?(name: string): Promise<ArrayBuffer>;
 }
 
 /** Dev convenience: files extracted by tools/extract.mjs into public/data/<game>/ (with manifest.json). */
@@ -32,12 +34,21 @@ export class HttpVfs implements Vfs {
 /** Files picked from a CD (directory input / drag & drop of a folder). */
 export class FileListVfs implements Vfs {
   private map = new Map<string, Blob>();
+  private rootFiles = new Map<string, Blob>();
   constructor(files: Iterable<[string, Blob]>, root = 'BASWIN') {
-    for (const [p, blob] of files) {
-      const parts = p.replace(/\\/g, '/').toUpperCase().split('/');
+    const all = [...files].map(([p, b]) => [p.replace(/\\/g, '/').toUpperCase().split('/'), b] as const);
+    for (const [parts, blob] of all) {
       const i = parts.indexOf(root);
       if (i >= 0) this.map.set(parts.slice(i + 1).join('/'), blob);
     }
+    // files next to BASWIN = CD root
+    const depth = all.find(([parts]) => parts.includes(root))?.[0].indexOf(root);
+    if (depth !== undefined) for (const [parts, blob] of all) if (parts.length === depth + 1) this.rootFiles.set(parts[depth], blob);
+  }
+  async readRoot(name: string) {
+    const b = this.rootFiles.get(name.toUpperCase());
+    if (!b) throw new Error(`not found: ${name}`);
+    return b.arrayBuffer();
   }
   list() { return [...this.map.keys()]; }
   async read(path: string) {
@@ -50,6 +61,7 @@ export class FileListVfs implements Vfs {
 /** Read-only ISO9660 reader over a Blob (File or OPFS file); reads lazily via slice(). */
 export class IsoVfs implements Vfs {
   private entries = new Map<string, { lba: number; size: number }>();
+  private all = new Map<string, { lba: number; size: number }>();
   private blob: Blob;
   readonly volumeId: string;
 
@@ -90,6 +102,7 @@ export class IsoVfs implements Vfs {
     const rooted = new Map<string, { lba: number; size: number }>();
     for (const [p, e] of iso.entries) if (p.startsWith(root + '/')) rooted.set(p.slice(root.length + 1), e);
     if (!rooted.size) throw new Error(`Geen ${root}-map gevonden in deze ISO.`);
+    iso.all = iso.entries;
     iso.entries = rooted;
     return iso;
   }
@@ -99,6 +112,12 @@ export class IsoVfs implements Vfs {
   async read(path: string) {
     const e = this.entries.get(path);
     if (!e) throw new Error(`not found: ${path}`);
+    return this.blob.slice(e.lba * 2048, e.lba * 2048 + e.size).arrayBuffer();
+  }
+
+  async readRoot(name: string) {
+    const e = this.all.get(name.toUpperCase());
+    if (!e) throw new Error(`not found: ${name}`);
     return this.blob.slice(e.lba * 2048, e.lba * 2048 + e.size).arrayBuffer();
   }
 }
@@ -126,6 +145,12 @@ export class ArchiveVfs implements Vfs {
 
   private urlFor(path: string) {
     return this.url + path.split('/').map(encodeURIComponent).join('%2F');
+  }
+
+  async readRoot(name: string) {
+    const res = await fetch(this.url.replace(/[^/]*%2F$/, '') + encodeURIComponent(name.toUpperCase()));
+    if (!res.ok) throw new Error(`archive.org: HTTP ${res.status} voor ${name}`);
+    return res.arrayBuffer();
   }
 
   read(path: string): Promise<ArrayBuffer> {
