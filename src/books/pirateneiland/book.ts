@@ -18,6 +18,7 @@ import type { Assets } from '../../engine/assets.ts';
 import { SRCAND, SRCPAINT, Surface, decodeBmp, type TextRun } from '../../engine/surface.ts';
 import { Form, type Display, type Timer } from '../../engine/vcl.ts';
 import { pirateneilandGames } from '../../games/pirateneiland/index.ts';
+import { skipMedia, somethingToSkip } from '../../engine/skip.ts';
 import { runCredits } from './credits.ts';
 import { SpriteCursor } from './cursor.ts';
 import { Mci } from './mci.ts';
@@ -49,6 +50,7 @@ const SIGN: Rect = [220, 301, 416, 480];
 const SIGN_JA = (x: number, y: number) => x > 254 && x < 305 && y > 334 && y < 371;
 const SIGN_NEE = (x: number, y: number) => x > 323 && x < 386 && y > 337 && y < 372;
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const MOUSE_TICK_MS = 55; // deviation: nominally 10 ms (DFM), really ~55 ms on Win9x
 
 interface Anim { name: string; bmp: Surface; frames: number; delay: number; rect: Rect; wav: AudioBuffer | null }
@@ -85,8 +87,14 @@ class PirateneilandBook {
   /** INI Pagina as read at start-up (DAT_0043d674): bookmarks written later do not change it. */
   private bookmark = readLegger();
   private introFlag = false;
+  private gameModalDepth = 0;
   private movieDone = false;
   private closing = false;
+  private ff = false; // "Sla over" is fast-forwarding the script
+  private gameSkipped = false;
+  private gameStart = 0;
+  private gameIntroHeard = false;
+  private gameIntroDone = false;
 
   // resources that stay for the whole run
   private pattern!: Surface;
@@ -181,6 +189,7 @@ class PirateneilandBook {
     // FormCreate: ScriptTimer 70 ms, state 20 (intro movie). The MouseTimer stays off until the first SETMOUSETYPE.
     this.scriptTimer = f.timer(70, () => this.tick());
     this.mouseTimer = f.timer(MOUSE_TICK_MS, () => this.mouseTick(), false);
+    this.display.skipProvider = () => this.skipInfo();
     this.display.overlay = (screen) => {
       if (this.mouseTimer.enabled && !this.covered && this.mouseSeen) this.cursor.paint(screen, this.display.mouseX, this.display.mouseY);
     };
@@ -203,6 +212,7 @@ class PirateneilandBook {
     this.scriptTimer.enabled = false;
     this.mouseTimer.enabled = false;
     this.display.overlay = null;
+    this.display.skipProvider = null;
     audio.sndPlaySound(null);
     this.mci.close();
     this.form.hide();
@@ -251,6 +261,7 @@ class PirateneilandBook {
   // ---------------------------------------------------------------- ScriptTimer (3.4)
 
   private async tick() {
+    if (this.ff) return; // "Sla over" is fast-forwarding the script
     switch (this.st) {
       case S.Intro: { // FormCreate's first tick: the intro movie
         this.st = S.Idle;
@@ -877,6 +888,9 @@ class PirateneilandBook {
     markGameSeen(n);
     this.blackout();
     this.gameResult = 0;
+    this.gameSkipped = false;
+    this.gameStart = performance.now();
+    this.gameIntroHeard = this.gameIntroDone = false;
     this.covered = true;
     this.st = S.Game;
     const load = pirateneilandGames[name];
@@ -887,9 +901,10 @@ class PirateneilandBook {
     }
     try {
       const mod = await load();
+      this.gameModalDepth = this.display.modalDepth;
       const session = mod.default({ display: this.display, assets: this.assets });
       // the games report 2 = won, 3 = lost (or closed early)
-      session.result.then((r) => { this.gameResult = r === 2 ? 2 : 3; }, (e) => { console.error(e); this.gameResult = 3; });
+      session.result.then((r) => { this.gameResult = this.gameSkipped || r === 2 ? 2 : 3; }, (e) => { console.error(e); this.gameResult = this.gameSkipped ? 2 : 3; });
     } catch (e) {
       console.error(`spel ${name} kon niet starten, telt als gewonnen`, e);
       this.gameResult = 2;
@@ -908,6 +923,79 @@ class PirateneilandBook {
     this.movieDone = false;
     this.covered = true;
     playMovieWindow(this.display, this.assets, n).catch((e) => console.error(e)).then(() => { this.movieDone = true; });
+  }
+
+  // ---------------------------------------------------------------- "Sla over" (not in the original)
+
+  /** What the skip button offers right now. */
+  private skipInfo(): { label: string; action: () => void } | null {
+    const st = this.st;
+    if (this.closing || st === S.Intro || st === S.Load || st === S.Quit) return null;
+    if (st === S.SignUp || st === S.SignDown || st === S.SignWait) return null;
+    if (st === S.MovieWait) return { label: 'Film overslaan ⏭', action: () => skipMedia() };
+    if (st === S.Game) {
+      // the spoken instructions start shortly after the game opens; once they are over (or skipped)
+      // the button offers to skip the game itself
+      if (!this.gameIntroDone) {
+        const playing = somethingToSkip();
+        if (playing) this.gameIntroHeard = true;
+        else if (this.gameIntroHeard || performance.now() - this.gameStart > 4000) this.gameIntroDone = true;
+        if (!this.gameIntroDone) return { label: 'Uitleg overslaan ⏭', action: () => { skipMedia(); this.gameIntroDone = true; } };
+      }
+      return { label: 'Spel overslaan ⏭', action: () => this.skipGame() };
+    }
+    if (st === S.Wait && !this.worm.busy) {
+      if (this.sc && this.nextScene === this.curScene) return null; // nowhere to go
+      return { label: 'Volgende pagina ⏭', action: () => this.skipPage() };
+    }
+    return { label: 'Sla over ⏭', action: () => void this.fastForward() };
+  }
+
+  /** Run the page's script instantly up to the point where it waits for the player. */
+  private async fastForward() {
+    if (this.ff) return;
+    this.ff = true;
+    try {
+      skipMedia();
+      this.worm.skip();
+      for (let i = 0; i < 5000; i++) {
+        const st = this.st;
+        if (st === S.Anim) {
+          this.animSound = false;
+          this.animCur = this.animTo;
+          this.drawAnimFrame(); // show the last frame
+          this.st = this.ret;
+        } else if (st === S.Delay) this.st = this.ret;
+        else if (st === S.Effect) {
+          this.mci.stop();
+          this.st = this.ret;
+        } else if (st === S.Reader) {
+          this.mci.stop();
+          this.tickReader();
+        } else if (st === S.Run) await this.runLine();
+        else if (st === S.Idle) await sleep(10);
+        else break;
+        audio.stopSystemSound(); // sounds started by the skipped lines
+      }
+      if (this.st !== S.Reader) this.mci.stop();
+    } finally {
+      this.ff = false;
+    }
+  }
+
+  /** Go to the next page now, like the menu's "next page" icon. */
+  private skipPage() {
+    audio.sndPlaySound(null);
+    this.mci.stop();
+    this.st = S.Load;
+  }
+
+  /** Leave the minigame as if it was won. */
+  private skipGame() {
+    this.gameSkipped = true;
+    audio.skipSounds();
+    this.display.closeModalsFrom(this.gameModalDepth, 2);
+    this.gameResult = 2;
   }
 }
 

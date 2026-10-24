@@ -9,6 +9,7 @@ import { audio, MediaPlayer, SND_ASYNC } from '../../engine/audio.ts';
 import type { Assets } from '../../engine/assets.ts';
 import { Avi } from '../../engine/avi.ts';
 import { Surface } from '../../engine/surface.ts';
+import { onSkip, skipMedia } from '../../engine/skip.ts';
 import { Form, type Display } from '../../engine/vcl.ts';
 import { isMovieSeen, loadSign, ptInRect, QuitSign, type Rect } from './shared.ts';
 
@@ -46,7 +47,7 @@ export async function runBerenBios(display: Display, assets: Assets): Promise<vo
     let loading = false; // a movie file is being fetched
     let exitAsked = false;
 
-    const finish = () => { player.close(); form.close(); resolve(); };
+    const finish = () => { display.skipProvider = null; player.close(); form.close(); resolve(); };
 
     // End of a movie (end of file, or the stop icon): "end" jingle, back to the cinema.
     const endMovie = () => {
@@ -112,6 +113,9 @@ export async function runBerenBios(display: Display, assets: Assets): Promise<vo
       }
     };
 
+    // "Sla over" (not in the original): a playing film can be ended early, like the stop icon
+    display.skipProvider = () => (movie ? { label: 'Film overslaan ⏭', action: () => skipMedia() } : null);
+
     // start screen: the cinema plus BB001.WAV, input blocked until the WAV has finished
     drawBackdrop(cinema);
     playWave(startWav);
@@ -138,10 +142,17 @@ function playAvi(avi: Avi, target: Surface, x: number, y: number, onEnd: () => v
     src.start(t0);
   }
   let playing = true, last = -1;
+  const unskip = onSkip(() => { // "Sla over": the film ends as if it had played to its end
+    if (!playing) return;
+    playing = false;
+    unskip();
+    try { src?.stop(); } catch { /* not started */ }
+    onEnd();
+  });
   const step = () => {
     if (!playing) return;
     const n = Math.floor((now() - t0) * avi.fps);
-    if (n >= avi.frames.length) { playing = false; onEnd(); return; }
+    if (n >= avi.frames.length) { playing = false; unskip(); onEnd(); return; }
     if (n >= 0 && n !== last) {
       avi.frame(n, frame);
       target.bitBlt(x, y, avi.width, avi.height, frame, 0, 0);
@@ -153,6 +164,7 @@ function playAvi(avi: Avi, target: Surface, x: number, y: number, onEnd: () => v
   return {
     stop() {
       playing = false;
+      unskip();
       try { src?.stop(); } catch { /* not started */ }
     },
   };

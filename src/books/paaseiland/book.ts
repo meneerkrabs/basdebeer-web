@@ -99,6 +99,7 @@ class PaaseilandBook {
   private mainImage: Surface | null = null;
   loadedScene = -1;
   private loading = false;
+  private gameModalDepth = 0;
   private closing = false;
   private ff = false;
   private gameSkipped = false;
@@ -1012,7 +1013,7 @@ class PaaseilandBook {
   private skipGame() {
     this.gameSkipped = true;
     audio.skipSounds();
-    this.display.closeTopModal(1);
+    this.display.closeModalsFrom(this.gameModalDepth, 1);
     this.gameResult = 1;
   }
 
@@ -1028,6 +1029,7 @@ class PaaseilandBook {
     this.drawMenuButtons(true, false, false);
     this.hourglass = false;
     this.form.cursor = 'default';
+    this.gameModalDepth = this.display.modalDepth;
     const session = mod.default({ display: this.display, assets: this.assets });
     this.game = session;
     this.gameSkipped = false;

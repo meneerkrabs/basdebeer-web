@@ -4,6 +4,7 @@
 
 import type { Assets } from '../../engine/assets.ts';
 import type { Display } from '../../engine/vcl.ts';
+import { skipMedia } from '../../engine/skip.ts';
 import { readBookmark, type Session } from './common.ts';
 import { runCredits } from './credits.ts';
 import { runSplash } from './splash.ts';
@@ -32,6 +33,20 @@ class NoorderlichtBook {
   }
 
   async run() {
+    // "Sla over" (not in the original): the splash and the story pages; the other screens only wait for a choice
+    this.display.skipProvider = () => {
+      if (this.phase === 'splash') return { label: 'Sla over ⏭', action: () => skipMedia() };
+      if (this.phase === 'story') return this.story?.skipInfo() ?? null;
+      return null;
+    };
+    try {
+      await this.runFlow();
+    } finally {
+      this.display.skipProvider = null;
+    }
+  }
+
+  private async runFlow() {
     // ?page=05N starts the story directly, like the original's "/S05N" ("direct mode": no splash, no welcome
     // screen, and closing the story ends the program without credits)
     const direct = new URLSearchParams(location.search).get('page');

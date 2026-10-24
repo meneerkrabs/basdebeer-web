@@ -4,6 +4,7 @@
 
 import type { Assets } from '../../engine/assets.ts';
 import { Avi, playAvi } from '../../engine/avi.ts';
+import { onSkip } from '../../engine/skip.ts';
 import { Form, type Display } from '../../engine/vcl.ts';
 import type { Rect } from './textbox.ts';
 
@@ -19,12 +20,24 @@ const MOVIES: Record<number, MovieDef> = {
 export async function playMovieWindow(display: Display, assets: Assets, n: number): Promise<void> {
   const def = MOVIES[n];
   if (!def) return;
+  // "Sla over" (not in the original): ends the movie like the "verder gaan" hot-spot, also while it is still loading
+  let skipped = false, endNow = () => { skipped = true; };
+  const unskip = onSkip(() => endNow());
+  try {
+    await run(display, assets, def, () => skipped, (f) => { endNow = () => f.close(1); });
+  } finally {
+    unskip();
+  }
+}
+
+async function run(display: Display, assets: Assets, def: MovieDef, wasSkipped: () => boolean, setEnd: (f: Form) => void): Promise<void> {
   const [bg, avi] = await Promise.all([
     assets.image(def.background),
     assets.raw(def.avi).then((b) => new Avi(b)),
   ]).catch((e) => { console.error('Het filmpje kan niet worden afgespeeld', e); return [null, null] as const; });
-  if (!bg || !avi) return;
+  if (!bg || !avi || wasSkipped()) return;
   const f = new Form(display, 640, 480, 'frmMovie');
+  setEnd(f);
   f.surface.bitBlt(0, 0, 640, 480, bg, 0, 0);
   const hot = (x: number, y: number) => x > def.skip[0] && x < def.skip[2] && y > def.skip[1] && y < def.skip[3];
   const done = f.showModal();

@@ -7,6 +7,7 @@
 
 import { audio, SND_ASYNC } from '../../engine/audio.ts';
 import type { Assets } from '../../engine/assets.ts';
+import { skipMedia, somethingToSkip } from '../../engine/skip.ts';
 import { SRCAND, SRCPAINT, Surface } from '../../engine/surface.ts';
 import { Form, type Display } from '../../engine/vcl.ts';
 import { pirateneilandGames } from '../../games/pirateneiland/index.ts';
@@ -45,6 +46,7 @@ export async function runBerenSpellen(display: Display, assets: Assets, registry
 
   // TfrmBackGround: the 800x600 BORD frame, only visible on a screen larger than 640x480
   let frame: Form | null = null;
+  let gameModalDepth = 0;
   if (display.width >= 800 && display.height >= 600) {
     const pieces = await Promise.all([1, 2, 3, 4, 5, 6, 7].map((i) => assets.image(`BORD${i}S.BMP`).catch(() => null)));
     const [p1, p2, p3, p4, p5, p6, p7] = pieces;
@@ -113,10 +115,22 @@ export async function runBerenSpellen(display: Display, assets: Assets, registry
       }
       state.busy = true; // the original disables its timer while the game runs
       form.hide();
+      gameModalDepth = display.modalDepth;
       const session = mod.default({ display, assets });
+      // "Sla over" (not in the original): spoken instructions first, then the game itself (back to the menu)
+      let introHeard = false, introDone = false;
+      const gameStart = performance.now();
+      display.skipProvider = () => {
+        if (!introDone) {
+          if (somethingToSkip()) introHeard = true;
+          else if (introHeard || performance.now() - gameStart > 4000) introDone = true;
+          if (!introDone) return { label: 'Uitleg overslaan ⏭', action: () => { skipMedia(); introDone = true; } };
+        }
+        return { label: 'Spel overslaan ⏭', action: () => { skipMedia(); display.closeModalsFrom(gameModalDepth, 2); } };
+      };
       const onKey = (e: KeyboardEvent) => e.key === 'Escape' && session.requestQuit?.();
       addEventListener('keydown', onKey);
-      try { await session.result; } finally { removeEventListener('keydown', onKey); }
+      try { await session.result; } finally { removeEventListener('keydown', onKey); display.skipProvider = null; }
       // the result (won, lost, closed) is ignored: back to the menu
       form.show();
       state.busy = false;

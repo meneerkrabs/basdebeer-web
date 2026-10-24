@@ -363,9 +363,19 @@ export class Display {
     }
   }
 
-  /** Close the topmost modal form (e.g. a skipped minigame) with a result code. */
+  /** Close the topmost modal form with a result code. */
   closeTopModal(code: number) {
     this.modal.at(-1)?.close(code);
+  }
+
+  /** Number of modal forms open (snapshot it before starting a minigame). */
+  get modalDepth() {
+    return this.modal.length;
+  }
+
+  /** Close every modal form opened since `depth` (a skipped minigame plus any dialog on top of it). */
+  closeModalsFrom(depth: number, code: number) {
+    while (this.modal.length > depth) this.modal.at(-1)!.close(code);
   }
 
   private present() {

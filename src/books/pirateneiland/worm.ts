@@ -130,6 +130,23 @@ export class BookWorm {
     }
   }
 
+  /** "Sla over" (not in the original): the worm's walk/talk is over at once and it is gone from the page. */
+  skip() {
+    if (!this.walking && !this.blocking) return;
+    for (const s of [this.path[Math.min(this.idx, this.path.length) - 1], { x: this.standX, y: this.standY }]) {
+      if (!s || !this.snapshot) continue;
+      copyPixels(this.host.back, this.snapshot, s.x, s.y, SIZE, SIZE);
+      this.host.blit(s.x, s.y, SIZE, SIZE);
+    }
+    this.host.mci.stop();
+    this.walking = false;
+    this.blocking = false;
+    this.done = true;
+  }
+
+  /** True while the worm is on its way or talking (its sequences can be skipped). */
+  get busy() { return this.walking || this.blocking; }
+
   /** One MouseTimer tick. */
   tick() {
     if (!this.armed) return;

@@ -9,6 +9,7 @@ import { playMidi, stopAllMidi, type MidiHandle } from '../../engine/midi.ts';
 import { SRCAND, SRCPAINT, Surface, type FontSpec } from '../../engine/surface.ts';
 import { Form, type Display, type Timer } from '../../engine/vcl.ts';
 import { noorderlichtGames } from '../../games/noorderlicht/index.ts';
+import { skipMedia, somethingToSkip } from '../../engine/skip.ts';
 import { inRect, pageExists, writeBookmark, withMode, type Rect, type Session } from './common.ts';
 import { askDialog, showKlikTip } from './dialogs.ts';
 
@@ -108,6 +109,7 @@ export class StoryPlayer {
   private swapping = false; // between Unload and the end of LoadScene: input is ignored
   private hourglass = true;
   private closing = false;
+  private gameModalDepth = 0;
   private turning = false;
   private theEnd = false;
   private goForward = true;
@@ -142,6 +144,13 @@ export class StoryPlayer {
   private countdown = 0;
   private gameResult: number | null = null;
   private gameParams: Record<string, string | number> | null = null;
+
+  // "Sla over" (not in the original)
+  private ff = false; // fast-forwarding the page: the timers stand still
+  private dialogs = 0; // quit / mode / tip dialogs that are open
+  private gameStart = 0;
+  private gameIntroHeard = false;
+  private gameIntroDone = false;
 
   // clTimer: continuous labels (spec 3.4)
   private clState = 0;
@@ -349,7 +358,7 @@ export class StoryPlayer {
       this.unload();
       if (this.theEnd) return;
       if (this.mode === 1 && !pageExists(this.env.assets, this.page)) {
-        await askDialog(this.env.display, this.env.assets, 3, this.mode); // "no 3D-plus page here"
+        await this.dlg(askDialog(this.env.display, this.env.assets, 3, this.mode)); // "no 3D-plus page here"
         this.returnTo3D = true;
         this.env.session.mode = 0;
         this.front.bitBlt(0, 0, 800, 600, this.bg[0], 0, 0);
@@ -373,16 +382,16 @@ export class StoryPlayer {
     if (this.mode === 0) {
       const dPage = withMode(this.page, 1);
       if (!pageExists(env.assets, dPage)) {
-        await askDialog(env.display, env.assets, 3, this.mode);
+        await this.dlg(askDialog(env.display, env.assets, 3, this.mode));
         return;
       }
-      if (!(await askDialog(env.display, env.assets, 1, this.mode))) return;
+      if (!(await this.dlg(askDialog(env.display, env.assets, 1, this.mode)))) return;
       this.unload();
       if (this.theEnd) return;
       this.page = dPage;
       env.session.mode = 1;
     } else {
-      if (!(await askDialog(env.display, env.assets, 2, this.mode))) return;
+      if (!(await this.dlg(askDialog(env.display, env.assets, 2, this.mode)))) return;
       this.unload();
       if (this.theEnd) return;
       this.page = withMode(this.page, 0);
@@ -394,7 +403,7 @@ export class StoryPlayer {
 
   /** The Stop button (FUN_0044406c). */
   private async stopButton() {
-    if (await askDialog(this.env.display, this.env.assets, 0, this.mode)) {
+    if (await this.dlg(askDialog(this.env.display, this.env.assets, 0, this.mode))) {
       this.unload();
       this.close();
     }
@@ -408,6 +417,11 @@ export class StoryPlayer {
   }
 
   private async commandTick() {
+    if (this.ff) return; // "Sla over" is fast-forwarding
+    await this.step();
+  }
+
+  private async step() {
     if (!this.ready) return;
     this.ready = false;
     this.pc++;
@@ -580,6 +594,7 @@ export class StoryPlayer {
   // ---------------------------------------------------------------- AniTimer (spec 3.5)
 
   private aniTick() {
+    if (this.ff) return;
     switch (this.waitState) {
       case 1:
         this.waitState = 0;
@@ -831,7 +846,10 @@ export class StoryPlayer {
     this.gameParams = { mode: this.mode === 0 ? 'N' : 'D', prev: this.history.length > 0 ? 1 : 0 };
     this.form.hide(); // the story player re-shows itself at the next ACTIVATE_MAINIMAGE
     this.waitState = 4;
+    this.gameStart = performance.now();
+    this.gameIntroHeard = this.gameIntroDone = false;
     this.aniTimer.setInterval(20);
+    this.gameModalDepth = this.env.display.modalDepth;
     const session = mod.default({ display: this.env.display, assets: this.env.assets, params: this.gameParams });
     void session.result.then((r) => (this.gameResult = r), (e) => { console.error(e); this.gameResult = 1; });
   }
@@ -859,6 +877,87 @@ export class StoryPlayer {
     } else void this.nextPage();
   }
 
+  // ---------------------------------------------------------------- "Sla over" (not in the original)
+
+  private async dlg<T>(p: Promise<T>): Promise<T> {
+    this.dialogs++;
+    try { return await p; } finally { this.dialogs--; }
+  }
+
+  /** What the skip button offers right now (null = nothing sensible: loading, a dialog is open, the end). */
+  skipInfo(): { label: string; action: () => void } | null {
+    if (this.closing || this.swapping || this.turning || this.dialogs > 0 || this.theEnd) return null;
+    if (this.waitState === 4) {
+      // the spoken instructions start shortly after the game opens; once they are over (or skipped) the
+      // button offers to skip the game itself
+      if (!this.gameIntroDone) {
+        const playing = somethingToSkip();
+        if (playing) this.gameIntroHeard = true;
+        else if (this.gameIntroHeard || performance.now() - this.gameStart > 4000) this.gameIntroDone = true;
+        if (!this.gameIntroDone) return { label: 'Uitleg overslaan ⏭', action: () => { skipMedia(); this.gameIntroDone = true; } };
+      }
+      return { label: 'Spel overslaan ⏭', action: () => this.skipGame() };
+    }
+    if (this.hourglass) return null;
+    const idle = this.runState === RS_IDLE && this.readerState !== 1 && !this.animating && this.waitState === 0 && this.ready === false;
+    if (idle) {
+      if (!this.nextScene) return null; // last page: nowhere to go
+      return { label: 'Volgende pagina ⏭', action: () => this.skipPage() };
+    }
+    if (this.runState === RS_ONEXIT) return null;
+    return { label: 'Sla over ⏭', action: () => void this.fastForward() };
+  }
+
+  /** Run the page's script instantly up to the point where it waits for the player. */
+  private async fastForward() {
+    if (this.ff || this.closing) return;
+    this.ff = true;
+    try {
+      skipMedia();
+      for (let i = 0; i < 5000; i++) {
+        if (this.closing || this.swapping || this.turning || this.theEnd || this.runState === RS_ONEXIT) break;
+        if (this.waitState === 4) break; // a game: skipped by its own button
+        if (this.waitState === 1) { this.waitState = 0; this.ready = true; }
+        else if (this.waitState === 2) { audio.sndPlaySound(null); this.waitState = 0; this.ready = true; this.restoreButtons(); }
+        else if (this.waitState === 3) { this.midi?.stop(); this.waitState = 0; this.ready = true; }
+        else if (this.animating && this.animCur) {
+          const a = this.animCur;
+          a.cur = this.animTo;
+          a.playSnd = false;
+          this.drawFrame(a, a.cur); // show the last frame
+          this.animating = false;
+          this.ready = true;
+        } else if (this.readerState === 1) {
+          this.reader.stop();
+          this.readerTick(); // un-highlights the last word and lets the script go on
+        } else if (this.readerState === 2) {
+          this.readerState = 0;
+          this.drawWord(0, false, true);
+        } else if (this.ready && this.runState === RS_RUN) await this.step();
+        else if (this.runState === RS_IDLE) break;
+        else await new Promise<void>((r) => setTimeout(r, 10)); // a command is still loading something
+        audio.sndPlaySound(null); // sounds started by the skipped commands
+      }
+    } finally {
+      this.ff = false;
+    }
+  }
+
+  /** Next page now, as the Next button does (also when too few clicks were made). */
+  private skipPage() {
+    this.reader.stop();
+    audio.sndPlaySound(null);
+    this.goForward = true;
+    void this.nextPage();
+  }
+
+  /** Leave the minigame as if it was solved (result 1 = next page). */
+  private skipGame() {
+    audio.skipSounds();
+    this.env.display.closeModalsFrom(this.gameModalDepth, 1);
+    this.gameResult = 1;
+  }
+
   // ---------------------------------------------------------------- input (spec 6.1, 6.2)
 
   private mouseDown(x: number, y: number) {
@@ -873,7 +972,7 @@ export class StoryPlayer {
       const t = this.text;
       if (t && t.words.length) this.startReader(0, t.words.length - 1, false, true);
     } else if (hit(B_MODE)) void this.toggleMode();
-    else if (hit(B_KLIK)) void showKlikTip(this.env.display, this.env.assets);
+    else if (hit(B_KLIK)) void this.dlg(showKlikTip(this.env.display, this.env.assets));
   }
 
   /** FUN_00445b44: the first enabled click area under the pointer runs its label. */

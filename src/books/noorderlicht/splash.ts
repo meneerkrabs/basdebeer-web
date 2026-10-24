@@ -2,6 +2,7 @@
 
 import { audio, SND_ASYNC } from '../../engine/audio.ts';
 import type { Assets } from '../../engine/assets.ts';
+import { onSkip } from '../../engine/skip.ts';
 import { Form, type Display } from '../../engine/vcl.ts';
 
 export async function runSplash(display: Display, assets: Assets): Promise<void> {
@@ -20,8 +21,10 @@ export async function runSplash(display: Display, assets: Assets): Promise<void>
     // an AudioContext that was never unlocked would keep the sound "playing" forever
     if (!audio.busy || (audio.ctx.state !== 'running' && ticks > 20)) f.close(1);
   });
+  const unskip = onSkip(() => f.close(1)); // "Sla over" (not in the original)
   const done = f.showModal();
   if (wav) audio.sndPlaySound(wav, SND_ASYNC);
   await done;
+  unskip();
   audio.sndPlaySound(null);
 }
